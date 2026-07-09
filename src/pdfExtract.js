@@ -3,6 +3,19 @@ import pdfParse from "pdf-parse";
 
 const DOI_PATTERN = /\b10\.\d{4,9}\/[-._;()/:A-Z0-9]+\b/i;
 
+export function decodePossiblyMojibakeFilename(filename) {
+  const value = String(filename || "");
+  if (!/[ÃÂÆÐÑÒÓÔÕÖØÙÚÛÜÝÞßà-ÿ]|æ|å|ç|è|é|ä|ö|ü/.test(value)) return value;
+  try {
+    const decoded = Buffer.from(value, "latin1").toString("utf8");
+    const originalChinese = (value.match(/[\u4e00-\u9fff]/g) || []).length;
+    const decodedChinese = (decoded.match(/[\u4e00-\u9fff]/g) || []).length;
+    return decodedChinese > originalChinese ? decoded : value;
+  } catch {
+    return value;
+  }
+}
+
 export function normalizeForParsing(value) {
   return String(value || "")
     .normalize("NFKC")
@@ -16,6 +29,12 @@ export function normalizeForParsing(value) {
 
 export function normalizeWhitespace(value) {
   return normalizeForParsing(value).replace(/\s+/g, " ").trim();
+}
+
+export function isPoorTextExtraction(text) {
+  const normalized = normalizeWhitespace(text);
+  const meaningful = normalized.replace(/[^\p{L}\p{N}\u4e00-\u9fff]/gu, "");
+  return meaningful.length < 80;
 }
 
 function cleanLine(line) {
@@ -133,6 +152,32 @@ export function inferTitleFromText(text) {
         !/(ISSN|CN |Vol\.|No\.|第\d+卷|网络首发论文|Journal of)/i.test(line)
     ) || ""
   );
+}
+
+export function inferTitleFromFilename(filename) {
+  const decoded = decodePossiblyMojibakeFilename(filename);
+  const base = decoded
+    .replace(/\.[^.]+$/g, "")
+    .replace(/[_-](?:\d{8,}|\d{4}-\d{2}-\d{2})$/g, "")
+    .replace(/[_-]+/g, " ")
+    .trim();
+  if (!base) return "";
+
+  const parts = base.split(/\s+|_/).filter(Boolean);
+  if (parts.length >= 2 && /^[\u4e00-\u9fff]{2,4}$/.test(parts.at(-1))) {
+    return parts.slice(0, -1).join(" ").trim();
+  }
+  return base;
+}
+
+export function inferAuthorsFromFilename(filename) {
+  const decoded = decodePossiblyMojibakeFilename(filename);
+  const base = decoded.replace(/\.[^.]+$/g, "").trim();
+  const parts = base.split(/[_-]+/).map((part) => part.trim()).filter(Boolean);
+  if (parts.length < 2) return [];
+  const suffix = parts.at(-1);
+  if (!/^[\u4e00-\u9fff]{2,4}(?:[，,、;；][\u4e00-\u9fff]{2,4})*$/.test(suffix)) return [];
+  return suffix.split(/[，,、;；]+/).filter(Boolean);
 }
 
 function parseNameList(source) {

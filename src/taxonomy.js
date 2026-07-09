@@ -1,5 +1,7 @@
 const taxonomy = {
   themes: [
+    ["geological evolution", ["geological evolution", "\u5730\u8d28\u6f14\u5316"]],
+    ["environmental change", ["environmental change", "\u73af\u5883\u53d8\u8fc1"]],
     ["event sedimentology", ["event sedimentology", "\u4e8b\u4ef6\u6c89\u79ef\u5b66"]],
     ["flood event", ["flood event", "paleoflood", "palaeoflood", "\u53e4\u6d2a\u6c34", "\u9ec4\u6cb3\u6d2a\u6c34", "\u6d2a\u6c34\u4e8b\u4ef6"]],
     ["lake sediment", ["lake sediment", "lacustrine", "\u6e56\u6cca\u6c89\u79ef", "\u6e56\u82af"]],
@@ -14,6 +16,7 @@ const taxonomy = {
     ["tectonic-climate interaction", ["tectonic", "\u6784\u9020", "uplift"]]
   ],
   regions: [
+    ["Henan Plain", ["henan plain", "\u6cb3\u5357\u5e73\u539f"]],
     ["Yellow River basin", ["yellow river", "\u9ec4\u6cb3", "\u5f00\u5c01"]],
     ["Qinghai-Tibet Plateau", ["qinghai-tibet plateau", "tibetan plateau", "\u9752\u85cf\u9ad8\u539f", "qtp"]],
     ["Loess Plateau", ["loess plateau", "\u9ec4\u571f\u9ad8\u539f"]],

@@ -3,7 +3,11 @@ import test from "node:test";
 
 import {
   detectDoi,
+  decodePossiblyMojibakeFilename,
   inferTitleFromText,
+  inferTitleFromFilename,
+  inferAuthorsFromFilename,
+  isPoorTextExtraction,
   parseAbstract,
   parseAuthors,
   parseJournal,
@@ -135,4 +139,24 @@ test("parses Chinese abstract and keywords", () => {
     "沉积记录",
     "小冰期"
   ]);
+});
+
+test("decodes mojibake Chinese upload filenames", () => {
+  const filename = "æ²³åå¹³åç¬¬åçºªå°è´¨æ¼åä¸ç¯å¢åè¿.pdf";
+
+  assert.equal(decodePossiblyMojibakeFilename(filename), "河南平原第四纪地质演化与环境变迁.pdf");
+});
+
+test("infers title from filename when PDF text extraction is poor", () => {
+  const text = "\n\n\n\n\n\n\n\n";
+  const filename = "河南平原第四纪地质演化与环境变迁.pdf";
+
+  assert.equal(isPoorTextExtraction(text), true);
+  assert.equal(inferTitleFromFilename(filename), "河南平原第四纪地质演化与环境变迁");
+});
+
+test("infers author suffix from common Chinese filename pattern", () => {
+  const filename = "开封明永宁王府遗址地层揭示的历史时期黄河洪水事件与灾变过程_韩艾珊.pdf";
+
+  assert.deepEqual(inferAuthorsFromFilename(filename), ["韩艾珊"]);
 });

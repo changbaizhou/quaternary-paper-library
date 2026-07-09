@@ -4,7 +4,11 @@ import { DatabaseSync } from "node:sqlite";
 
 import {
   detectDoi,
+  decodePossiblyMojibakeFilename,
+  inferAuthorsFromFilename,
   inferTitleFromText,
+  inferTitleFromFilename,
+  isPoorTextExtraction,
   parseAbstract,
   parseAuthors,
   parseJournal,
@@ -52,13 +56,17 @@ function searchText(paper) {
     .toLowerCase();
 }
 
-function reprocess(text) {
+function reprocess(text, filename = "") {
+  const decodedFilename = decodePossiblyMojibakeFilename(filename);
   const doi = detectDoi(text);
-  const title = inferTitleFromText(text);
-  const authors = parseAuthors(text);
+  const title = inferTitleFromText(text) || inferTitleFromFilename(decodedFilename);
+  const parsedAuthors = parseAuthors(text);
+  const authors = parsedAuthors.length ? parsedAuthors : inferAuthorsFromFilename(decodedFilename);
   const journal = parseJournal(text);
   const year = parseYear(text);
-  const abstract = parseAbstract(text);
+  const abstract =
+    parseAbstract(text) ||
+    (isPoorTextExtraction(text) ? "PDF 文本抽取结果过少，文件可能是扫描版，需要 OCR 才能自动识别作者、摘要等信息。" : "");
   const authorKeywords = parseKeywords(text);
   const result = classifyText({ title, abstract, keywords: authorKeywords, text });
   const suggestedKeywords = unique(
@@ -102,7 +110,7 @@ const updateDraft = db.prepare(`
   UPDATE drafts
   SET doi = ?, title = ?, authors_json = ?, journal = ?, year = ?, abstract = ?,
       author_keywords_json = ?, suggested_keywords_json = ?, classification_json = ?,
-      confidence_json = ?, evidence_json = ?
+      confidence_json = ?, evidence_json = ?, original_filename = ?
   WHERE id = ?
 `);
 
@@ -116,7 +124,7 @@ const updatePaper = db.prepare(`
 `);
 
 for (const draft of drafts) {
-  const next = reprocess(draft.extracted_text || "");
+  const next = reprocess(draft.extracted_text || "", draft.original_filename || draft.stored_filename || "");
   updateDraft.run(
     next.doi,
     next.title,
@@ -129,6 +137,7 @@ for (const draft of drafts) {
     JSON.stringify(next.classification),
     JSON.stringify(next.confidence),
     JSON.stringify(next.evidence),
+    decodePossiblyMojibakeFilename(draft.original_filename || draft.stored_filename || ""),
     draft.id
   );
   updatedDrafts += 1;

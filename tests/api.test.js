@@ -79,3 +79,22 @@ test("API workflow creates draft, confirms paper, searches, and exports", async 
   });
 });
 
+test("API falls back to decoded filename when extracted PDF text is sparse", async () => {
+  await withServer(async (baseUrl) => {
+    const createResponse = await fetch(`${baseUrl}/api/drafts/from-text`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        filename: "æ²³åå¹³åç¬¬åçºªå°è´¨æ¼åä¸ç¯å¢åè¿.pdf",
+        text: "\n\n\n\n\n\n\n"
+      })
+    });
+
+    assert.equal(createResponse.status, 201);
+    const draft = await createResponse.json();
+    assert.equal(draft.title, "河南平原第四纪地质演化与环境变迁");
+    assert.deepEqual(draft.classification.regions, ["Henan Plain"]);
+    assert.deepEqual(draft.classification.periods, ["Quaternary"]);
+    assert.match(draft.abstract, /扫描版/);
+  });
+});

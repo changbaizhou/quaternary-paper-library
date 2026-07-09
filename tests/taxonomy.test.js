@@ -55,3 +55,16 @@ test("classifies event sedimentology review from title and keywords", () => {
   assert.ok(!result.classification.themes.includes("glacier"));
   assert.ok(!result.classification.regions.includes("global comparison"));
 });
+
+test("classifies Quaternary geology book title from filename fallback", () => {
+  const result = classifyText({
+    title: "河南平原第四纪地质演化与环境变迁",
+    abstract: "",
+    keywords: []
+  });
+
+  assert.ok(result.classification.themes.includes("geological evolution"));
+  assert.ok(result.classification.themes.includes("environmental change"));
+  assert.ok(result.classification.regions.includes("Henan Plain"));
+  assert.ok(result.classification.periods.includes("Quaternary"));
+});

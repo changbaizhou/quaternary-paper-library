@@ -7,11 +7,15 @@ import { fileURLToPath } from "node:url";
 import { defaultConfig } from "./config.js";
 import { initDb } from "./database.js";
 import { exportBibtex, exportCsv, exportMarkdown } from "./exporters.js";
-import { lookupDoiMetadata } from "./metadata.js";
+import { lookupDoiMetadata, lookupTitleMetadata } from "./metadata.js";
 import {
   detectDoi,
+  decodePossiblyMojibakeFilename,
   extractPdfText,
+  inferAuthorsFromFilename,
   inferTitleFromText,
+  inferTitleFromFilename,
+  isPoorTextExtraction,
   parseAbstract,
   parseAuthors,
   parseJournal,
@@ -52,6 +56,10 @@ function mergeMetadata(local, remote) {
   };
 }
 
+function metadataFetch(url, options = {}) {
+  return fetch(url, { ...options, signal: AbortSignal.timeout(4500) });
+}
+
 async function createDraftFromText({
   repo,
   text,
@@ -61,16 +69,27 @@ async function createDraftFromText({
   enableLookup = false
 }) {
   const doi = detectDoi(text);
+  const decodedFilename = decodePossiblyMojibakeFilename(filename);
+  const parsedTitle = inferTitleFromText(text);
+  const filenameTitle = inferTitleFromFilename(decodedFilename);
+  const parsedAuthors = parseAuthors(text);
+  const filenameAuthors = inferAuthorsFromFilename(decodedFilename);
+  const poorText = isPoorTextExtraction(text);
   const local = {
     doi,
-    title: inferTitleFromText(text),
-    authors: parseAuthors(text),
+    title: parsedTitle || filenameTitle,
+    authors: parsedAuthors.length ? parsedAuthors : filenameAuthors,
     journal: parseJournal(text),
     year: parseYear(text),
-    abstract: parseAbstract(text),
+    abstract: parseAbstract(text) || (poorText ? "PDF 文本抽取结果过少，文件可能是扫描版，需要 OCR 才能自动识别作者、摘要等信息。" : ""),
     authorKeywords: parseKeywords(text)
   };
-  const remote = enableLookup && doi ? await lookupDoiMetadata(doi) : {};
+  const remote =
+    enableLookup && doi
+      ? await lookupDoiMetadata(doi, { fetchImpl: metadataFetch })
+      : enableLookup
+        ? await lookupTitleMetadata(local.title, { fetchImpl: metadataFetch })
+        : {};
   const metadata = mergeMetadata(local, remote);
   const classificationResult = classifyText({
     title: metadata.title,
@@ -144,8 +163,9 @@ export function createApp(options = {}) {
       mkdirSync(targetDir, { recursive: true });
 
       for (const file of request.files || []) {
-        const extension = path.extname(file.originalname) || ".pdf";
-        const storedFilename = `${Date.now()}-${slugify(path.basename(file.originalname, extension))}${extension}`;
+        const decodedOriginalName = decodePossiblyMojibakeFilename(file.originalname);
+        const extension = path.extname(decodedOriginalName) || ".pdf";
+        const storedFilename = `${Date.now()}-${slugify(path.basename(decodedOriginalName, extension))}${extension}`;
         const targetPath = path.join(targetDir, storedFilename);
         writeFileSync(targetPath, file.buffer);
 
@@ -159,7 +179,7 @@ export function createApp(options = {}) {
         const draft = await createDraftFromText({
           repo,
           text,
-          filename: file.originalname,
+          filename: decodedOriginalName,
           storedFilename,
           storedPath: path.relative(process.cwd(), targetPath),
           enableLookup: true
