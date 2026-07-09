@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "node src/server.js",
+    "reprocess": "node scripts/reprocessLibrary.js",
     "test": "node --test"
   },
   "dependencies": {
@@ -13,4 +14,3 @@
     "pdf-parse": "^1.1.1"
   }
 }
-

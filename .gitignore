@@ -1,7 +1,7 @@
 node_modules/
-library/*.sqlite
+library/*.sqlite*
+library/backups/
 library/files/
 server.out.log
 server.err.log
 .env
-

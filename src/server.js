@@ -13,7 +13,10 @@ import {
   extractPdfText,
   inferTitleFromText,
   parseAbstract,
-  parseKeywords
+  parseAuthors,
+  parseJournal,
+  parseKeywords,
+  parseYear
 } from "./pdfExtract.js";
 import { PaperRepository } from "./repository.js";
 import { classifyText } from "./taxonomy.js";
@@ -32,7 +35,7 @@ function normalizeList(value) {
   if (Array.isArray(value)) return value.filter(Boolean);
   if (!value) return [];
   return String(value)
-    .split(/[;,，；|]+/)
+    .split(/[;,\uFF0C\uFF1B|]+/)
     .map((item) => item.trim())
     .filter(Boolean);
 }
@@ -61,9 +64,9 @@ async function createDraftFromText({
   const local = {
     doi,
     title: inferTitleFromText(text),
-    authors: [],
-    journal: "",
-    year: null,
+    authors: parseAuthors(text),
+    journal: parseJournal(text),
+    year: parseYear(text),
     abstract: parseAbstract(text),
     authorKeywords: parseKeywords(text)
   };
