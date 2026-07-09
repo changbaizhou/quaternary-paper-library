@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>第四纪论文库</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <h1>第四纪论文库</h1>
+        <p id="statusText">本地资料库</p>
+      </div>
+      <form id="uploadForm" class="upload-form">
+        <input id="pdfInput" type="file" name="files" accept="application/pdf" multiple />
+        <button type="submit">上传 PDF</button>
+      </form>
+      <div class="export-group">
+        <a href="/api/export/bibtex">BibTeX</a>
+        <a href="/api/export/csv">CSV</a>
+        <a href="/api/export/markdown">Markdown</a>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <aside class="filters">
+        <section>
+          <h2>检索</h2>
+          <input id="searchInput" type="search" placeholder="标题、作者、摘要、笔记" />
+        </section>
+        <section>
+          <h2>筛选</h2>
+          <label>主题<input id="filterThemes" type="text" placeholder="lake sediment" /></label>
+          <label>区域<input id="filterRegions" type="text" placeholder="Qinghai-Tibet Plateau" /></label>
+          <label>时期<input id="filterPeriods" type="text" placeholder="Holocene" /></label>
+          <label>材料<input id="filterMaterials" type="text" placeholder="lake core" /></label>
+          <label>方法<input id="filterMethods" type="text" placeholder="pollen" /></label>
+          <label>指标<input id="filterProxies" type="text" placeholder="pollen" /></label>
+          <button id="searchButton" type="button">查询</button>
+          <button id="clearFiltersButton" type="button" class="secondary">清空</button>
+        </section>
+        <section>
+          <h2>待确认</h2>
+          <div id="draftList" class="compact-list"></div>
+        </section>
+      </aside>
+
+      <section class="paper-list-panel">
+        <div class="panel-heading">
+          <h2>论文</h2>
+          <span id="paperCount">0</span>
+        </div>
+        <div id="paperList" class="paper-list"></div>
+      </section>
+
+      <section class="detail-panel">
+        <div class="panel-heading">
+          <h2 id="detailTitle">详情</h2>
+          <span id="detailMode">未选择</span>
+        </div>
+        <form id="detailForm" class="detail-form">
+          <input type="hidden" id="draftId" />
+          <label>题名<input id="titleField" type="text" /></label>
+          <label>作者<input id="authorsField" type="text" placeholder="作者之间用分号分隔" /></label>
+          <div class="two-column">
+            <label>年份<input id="yearField" type="number" /></label>
+            <label>DOI<input id="doiField" type="text" /></label>
+          </div>
+          <label>期刊<input id="journalField" type="text" /></label>
+          <label>摘要<textarea id="abstractField" rows="5"></textarea></label>
+          <label>关键词<input id="keywordsField" type="text" /></label>
+          <div class="two-column">
+            <label>主题<input id="themesField" type="text" /></label>
+            <label>区域<input id="regionsField" type="text" /></label>
+            <label>时期<input id="periodsField" type="text" /></label>
+            <label>材料<input id="materialsField" type="text" /></label>
+            <label>方法<input id="methodsField" type="text" /></label>
+            <label>指标<input id="proxiesField" type="text" /></label>
+          </div>
+          <label>阅读状态
+            <select id="readingStatusField">
+              <option value="to-read">待读</option>
+              <option value="reading">精读中</option>
+              <option value="read">已读</option>
+              <option value="must-read">重点</option>
+              <option value="method-reference">方法参考</option>
+            </select>
+          </label>
+          <label>研究问题<textarea id="notesResearchQuestionField" rows="2"></textarea></label>
+          <label>研究区<textarea id="notesRegionField" rows="2"></textarea></label>
+          <label>材料与方法<textarea id="notesMaterialsMethodsField" rows="2"></textarea></label>
+          <label>年代框架<textarea id="notesChronologyField" rows="2"></textarea></label>
+          <label>核心结论<textarea id="notesCoreFindingsField" rows="3"></textarea></label>
+          <label>局限性<textarea id="notesLimitsField" rows="2"></textarea></label>
+          <label>可引用观点<textarea id="notesQuotePointsField" rows="2"></textarea></label>
+          <label>我的备注<textarea id="notesPersonalField" rows="3"></textarea></label>
+          <div id="evidenceBox" class="evidence-box"></div>
+          <button id="confirmButton" type="submit">确认入库</button>
+        </form>
+      </section>
+    </main>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
+

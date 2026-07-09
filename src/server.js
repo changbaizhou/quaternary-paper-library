@@ -1,0 +1,231 @@
+import express from "express";
+import multer from "multer";
+import { mkdirSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { defaultConfig } from "./config.js";
+import { initDb } from "./database.js";
+import { exportBibtex, exportCsv, exportMarkdown } from "./exporters.js";
+import { lookupDoiMetadata } from "./metadata.js";
+import {
+  detectDoi,
+  extractPdfText,
+  inferTitleFromText,
+  parseAbstract,
+  parseKeywords
+} from "./pdfExtract.js";
+import { PaperRepository } from "./repository.js";
+import { classifyText } from "./taxonomy.js";
+
+const upload = multer({ storage: multer.memoryStorage() });
+
+function slugify(value) {
+  return String(value || "paper")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80) || "paper";
+}
+
+function normalizeList(value) {
+  if (Array.isArray(value)) return value.filter(Boolean);
+  if (!value) return [];
+  return String(value)
+    .split(/[;,，；|]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function mergeMetadata(local, remote) {
+  return {
+    doi: remote.doi || local.doi || "",
+    title: remote.title || local.title || "",
+    authors: remote.authors?.length ? remote.authors : local.authors || [],
+    journal: remote.journal || local.journal || "",
+    year: remote.year || local.year || null,
+    abstract: remote.abstract || local.abstract || "",
+    authorKeywords: remote.authorKeywords?.length ? remote.authorKeywords : local.authorKeywords || []
+  };
+}
+
+async function createDraftFromText({
+  repo,
+  text,
+  filename,
+  storedFilename = "",
+  storedPath = "",
+  enableLookup = false
+}) {
+  const doi = detectDoi(text);
+  const local = {
+    doi,
+    title: inferTitleFromText(text),
+    authors: [],
+    journal: "",
+    year: null,
+    abstract: parseAbstract(text),
+    authorKeywords: parseKeywords(text)
+  };
+  const remote = enableLookup && doi ? await lookupDoiMetadata(doi) : {};
+  const metadata = mergeMetadata(local, remote);
+  const classificationResult = classifyText({
+    title: metadata.title,
+    abstract: metadata.abstract,
+    keywords: metadata.authorKeywords,
+    text
+  });
+
+  const draftId = repo.createDraft({
+    originalFilename: filename,
+    storedFilename,
+    storedPath,
+    ...metadata,
+    suggestedKeywords: [
+      ...classificationResult.classification.themes,
+      ...classificationResult.classification.methods,
+      ...classificationResult.classification.proxies
+    ],
+    classification: classificationResult.classification,
+    confidence: classificationResult.confidence,
+    evidence: classificationResult.evidence,
+    extractedText: text
+  });
+
+  return repo.getDraft(draftId);
+}
+
+function parseFilters(query) {
+  const filterFields = ["themes", "regions", "periods", "materials", "methods", "proxies"];
+  const filters = {};
+  for (const field of filterFields) {
+    if (query[field]) filters[field] = normalizeList(query[field]);
+  }
+  return filters;
+}
+
+export function createApp(options = {}) {
+  const config = { ...defaultConfig, ...options };
+  mkdirSync(config.filesDir, { recursive: true });
+  mkdirSync(path.dirname(config.dbPath), { recursive: true });
+  initDb(config.dbPath);
+  const repo = new PaperRepository(config.dbPath);
+  const app = express();
+
+  app.use(express.json({ limit: "2mb" }));
+  app.use(express.static(config.staticDir));
+
+  app.get("/api/health", (_request, response) => {
+    response.json({ ok: true });
+  });
+
+  app.post("/api/drafts/from-text", async (request, response, next) => {
+    try {
+      const draft = await createDraftFromText({
+        repo,
+        text: request.body.text || "",
+        filename: request.body.filename || "text-import.txt",
+        enableLookup: Boolean(request.body.enableLookup)
+      });
+      response.status(201).json(draft);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/uploads", upload.array("files"), async (request, response, next) => {
+    try {
+      const drafts = [];
+      const year = new Date().getFullYear();
+      const targetDir = path.join(config.filesDir, String(year));
+      mkdirSync(targetDir, { recursive: true });
+
+      for (const file of request.files || []) {
+        const extension = path.extname(file.originalname) || ".pdf";
+        const storedFilename = `${Date.now()}-${slugify(path.basename(file.originalname, extension))}${extension}`;
+        const targetPath = path.join(targetDir, storedFilename);
+        writeFileSync(targetPath, file.buffer);
+
+        let text = "";
+        try {
+          text = await extractPdfText(targetPath);
+        } catch (error) {
+          text = `PDF text extraction failed: ${error.message}`;
+        }
+
+        const draft = await createDraftFromText({
+          repo,
+          text,
+          filename: file.originalname,
+          storedFilename,
+          storedPath: path.relative(process.cwd(), targetPath),
+          enableLookup: true
+        });
+        drafts.push(draft);
+      }
+
+      response.status(201).json(drafts);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/drafts", (_request, response) => {
+    response.json(repo.listPendingDrafts());
+  });
+
+  app.post("/api/drafts/:id/confirm", (request, response, next) => {
+    try {
+      const paperId = repo.confirmDraft(Number(request.params.id), request.body || {});
+      response.status(201).json(repo.getPaper(paperId));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/papers", (request, response) => {
+    response.json(
+      repo.searchPapers({
+        query: request.query.query || "",
+        filters: parseFilters(request.query)
+      })
+    );
+  });
+
+  app.get("/api/export/:format", (request, response) => {
+    const papers = repo.searchPapers();
+    const format = request.params.format;
+    if (format === "bibtex") {
+      response.type("application/x-bibtex").send(exportBibtex(papers));
+      return;
+    }
+    if (format === "csv") {
+      response.type("text/csv").send(exportCsv(papers));
+      return;
+    }
+    if (format === "markdown") {
+      response.type("text/markdown").send(exportMarkdown(papers));
+      return;
+    }
+    response.status(404).json({ error: "Unsupported export format" });
+  });
+
+  app.get(/.*/, (_request, response) => {
+    response.sendFile(path.join(config.staticDir, "index.html"));
+  });
+
+  app.use((error, _request, response, _next) => {
+    response.status(500).json({ error: error.message || "Internal server error" });
+  });
+
+  return app;
+}
+
+const currentFile = fileURLToPath(import.meta.url);
+if (process.argv[1] === currentFile) {
+  mkdirSync(defaultConfig.filesDir, { recursive: true });
+  const app = createApp();
+  app.listen(defaultConfig.port, () => {
+    console.log(`Quaternary Paper Library running at http://127.0.0.1:${defaultConfig.port}`);
+  });
+}

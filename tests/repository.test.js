@@ -1,0 +1,64 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import path from "node:path";
+import os from "node:os";
+
+import { initDb } from "../src/database.js";
+import { PaperRepository } from "../src/repository.js";
+
+test("draft confirm and search workflow", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-repo-"));
+  const dbPath = path.join(dir, "library.sqlite");
+
+  try {
+    initDb(dbPath);
+    const repo = new PaperRepository(dbPath);
+
+    const draftId = repo.createDraft({
+      originalFilename: "paper.pdf",
+      storedFilename: "li-2026-holocene.pdf",
+      storedPath: "library/files/2026/li-2026-holocene.pdf",
+      doi: "10.1000/test",
+      title: "Holocene lake sediment record",
+      authors: ["Li Wei", "Zhang Min"],
+      journal: "Quaternary Science Reviews",
+      year: 2026,
+      abstract: "A pollen and lake sediment record from the Qinghai-Tibet Plateau.",
+      authorKeywords: ["Holocene", "lake sediment"],
+      suggestedKeywords: ["pollen"],
+      classification: {
+        themes: ["lake sediment"],
+        regions: ["Qinghai-Tibet Plateau"],
+        periods: ["Holocene"],
+        materials: ["lake core"],
+        methods: ["pollen"],
+        proxies: ["pollen"]
+      },
+      confidence: {},
+      evidence: {},
+      extractedText: "Holocene lake sediment pollen Qinghai-Tibet Plateau"
+    });
+
+    const pending = repo.listPendingDrafts();
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].id, draftId);
+
+    const paperId = repo.confirmDraft(draftId, {
+      readingStatus: "to-read",
+      notesCoreFindings: "Monsoon variability is reconstructed."
+    });
+
+    assert.deepEqual(repo.listPendingDrafts(), []);
+    const results = repo.searchPapers({
+      query: "monsoon",
+      filters: { regions: ["Qinghai-Tibet Plateau"] }
+    });
+    assert.equal(results.length, 1);
+    assert.equal(results[0].id, paperId);
+    assert.equal(results[0].title, "Holocene lake sediment record");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
