@@ -47,11 +47,35 @@
       </aside>
 
       <section class="paper-list-panel">
-        <div class="panel-heading">
-          <h2>论文</h2>
-          <span id="paperCount">0</span>
+        <div id="paperListView" class="panel-view">
+          <div class="panel-heading">
+            <h2>论文</h2>
+            <span id="paperCount">0</span>
+          </div>
+          <div id="paperList" class="paper-list"></div>
         </div>
-        <div id="paperList" class="paper-list"></div>
+        <div id="readerView" class="panel-view reader-view" hidden>
+          <div class="panel-heading reader-heading">
+            <button id="backToListButton" type="button" class="secondary icon-button" title="返回列表">←</button>
+            <div class="reader-title-block">
+              <h2 id="readerTitle">原文阅读</h2>
+              <span id="readerMeta">未选择</span>
+            </div>
+            <a id="openPdfButton" class="icon-link" href="#" target="_blank" rel="noreferrer" title="新窗口打开">↗</a>
+          </div>
+          <div class="pdf-toolbar">
+            <button id="previousPageButton" type="button" class="secondary icon-button" title="上一页">‹</button>
+            <input id="pageNumberInput" type="number" min="1" value="1" />
+            <span id="pageCountText">/ 0</span>
+            <button id="nextPageButton" type="button" class="secondary icon-button" title="下一页">›</button>
+            <button id="zoomOutButton" type="button" class="secondary icon-button" title="缩小">−</button>
+            <span id="zoomText">100%</span>
+            <button id="zoomInButton" type="button" class="secondary icon-button" title="放大">+</button>
+          </div>
+          <div id="pdfViewer" class="pdf-viewer">
+            <div class="empty-state">选择论文后阅读原文件</div>
+          </div>
+        </div>
       </section>
 
       <section class="detail-panel">
@@ -104,4 +128,3 @@
     <script src="/app.js" type="module"></script>
   </body>
 </html>
-

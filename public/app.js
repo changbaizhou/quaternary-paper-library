@@ -1,7 +1,22 @@
+import * as pdfjsLib from "/vendor/pdfjs-dist/build/pdf.mjs";
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = "/vendor/pdfjs-dist/build/pdf.worker.mjs";
+
 const state = {
   drafts: [],
   papers: [],
-  selectedDraft: null
+  selectedDraft: null,
+  selectedPaper: null,
+  reader: {
+    document: null,
+    loadingTask: null,
+    paperId: null,
+    pageNumber: 1,
+    pageCount: 0,
+    scale: 1.15,
+    renderToken: 0,
+    sourceUrl: ""
+  }
 };
 
 const fields = {
@@ -28,6 +43,20 @@ const fields = {
   notesLimits: document.querySelector("#notesLimitsField"),
   notesQuotePoints: document.querySelector("#notesQuotePointsField"),
   notesPersonal: document.querySelector("#notesPersonalField")
+};
+
+const readerElements = {
+  listView: document.querySelector("#paperListView"),
+  readerView: document.querySelector("#readerView"),
+  title: document.querySelector("#readerTitle"),
+  meta: document.querySelector("#readerMeta"),
+  viewer: document.querySelector("#pdfViewer"),
+  openButton: document.querySelector("#openPdfButton"),
+  pageNumberInput: document.querySelector("#pageNumberInput"),
+  pageCountText: document.querySelector("#pageCountText"),
+  zoomText: document.querySelector("#zoomText"),
+  previousButton: document.querySelector("#previousPageButton"),
+  nextButton: document.querySelector("#nextPageButton")
 };
 
 function splitList(value) {
@@ -92,8 +121,9 @@ function renderPapers() {
         ...(paper.periods || []).map((item) => chip(item, "period")),
         ...(paper.methods || []).map((item) => chip(item, "method"))
       ].join("");
+      const selected = state.selectedPaper?.id === paper.id ? " selected" : "";
       return `
-        <article class="paper-item" data-paper-id="${paper.id}">
+        <article class="paper-item${selected}" data-paper-id="${paper.id}">
           <h3>${paper.title || "未命名论文"}</h3>
           <div class="meta-line">${(paper.authors || []).join(", ")} · ${paper.year || ""} · ${paper.journal || ""}</div>
           <div class="chip-row">${chips}</div>
@@ -105,6 +135,7 @@ function renderPapers() {
 
 function fillFormFromDraft(draft) {
   state.selectedDraft = draft;
+  state.selectedPaper = null;
   document.querySelector("#detailTitle").textContent = "自动识别结果";
   document.querySelector("#detailMode").textContent = "待确认";
   fields.draftId.value = draft.id;
@@ -152,6 +183,7 @@ function renderEvidence(draft) {
 
 function fillFormFromPaper(paper) {
   state.selectedDraft = null;
+  state.selectedPaper = paper;
   document.querySelector("#detailTitle").textContent = "论文详情";
   document.querySelector("#detailMode").textContent = "已入库";
   fields.draftId.value = "";
@@ -178,6 +210,139 @@ function fillFormFromPaper(paper) {
   fields.notesQuotePoints.value = paper.notesQuotePoints || "";
   fields.notesPersonal.value = paper.notesPersonal || "";
   document.querySelector("#evidenceBox").textContent = "已确认论文";
+}
+
+function showPaperListView() {
+  readerElements.readerView.hidden = true;
+  readerElements.listView.hidden = false;
+}
+
+function showReaderView() {
+  readerElements.listView.hidden = true;
+  readerElements.readerView.hidden = false;
+}
+
+function updateReaderControls() {
+  const { pageNumber, pageCount, scale } = state.reader;
+  readerElements.pageNumberInput.value = String(pageNumber || 1);
+  readerElements.pageNumberInput.max = String(pageCount || 1);
+  readerElements.pageCountText.textContent = `/ ${pageCount || 0}`;
+  readerElements.zoomText.textContent = `${Math.round(scale * 100)}%`;
+  readerElements.previousButton.disabled = pageNumber <= 1;
+  readerElements.nextButton.disabled = pageNumber >= pageCount;
+}
+
+async function closeReaderDocument() {
+  state.reader.renderToken += 1;
+  if (state.reader.loadingTask) {
+    state.reader.loadingTask.destroy();
+    state.reader.loadingTask = null;
+  }
+  if (state.reader.document) {
+    await state.reader.document.destroy();
+    state.reader.document = null;
+  }
+}
+
+function renderTextLayer(pageElement, textContent, viewport) {
+  const textLayer = document.createElement("div");
+  textLayer.className = "text-layer";
+  textLayer.style.width = `${viewport.width}px`;
+  textLayer.style.height = `${viewport.height}px`;
+  pageElement.append(textLayer);
+
+  for (const item of textContent.items || []) {
+    if (!item.str) continue;
+    const transform = pdfjsLib.Util.transform(viewport.transform, item.transform);
+    const fontHeight = Math.hypot(transform[2], transform[3]);
+    const angle = Math.atan2(transform[1], transform[0]);
+    const span = document.createElement("span");
+    span.textContent = item.str;
+    span.style.left = `${transform[4]}px`;
+    span.style.top = `${transform[5] - fontHeight}px`;
+    span.style.fontSize = `${fontHeight}px`;
+    span.style.transform = `rotate(${angle}rad)`;
+    textLayer.append(span);
+
+    const targetWidth = item.width * viewport.scale;
+    const actualWidth = span.getBoundingClientRect().width;
+    if (targetWidth > 0 && actualWidth > 0) {
+      span.style.transform = `rotate(${angle}rad) scaleX(${targetWidth / actualWidth})`;
+    }
+  }
+}
+
+async function renderCurrentPage() {
+  if (!state.reader.document) return;
+
+  const token = state.reader.renderToken + 1;
+  state.reader.renderToken = token;
+  const { document: pdfDocument, pageNumber, scale } = state.reader;
+  readerElements.viewer.innerHTML = `<div class="empty-state">正在加载页面</div>`;
+  updateReaderControls();
+
+  try {
+    const page = await pdfDocument.getPage(pageNumber);
+    if (state.reader.renderToken !== token) return;
+
+    const viewport = page.getViewport({ scale });
+    const pageElement = document.createElement("div");
+    pageElement.className = "pdf-page";
+    pageElement.style.width = `${viewport.width}px`;
+    pageElement.style.height = `${viewport.height}px`;
+
+    const canvas = document.createElement("canvas");
+    const outputScale = window.devicePixelRatio || 1;
+    canvas.width = Math.floor(viewport.width * outputScale);
+    canvas.height = Math.floor(viewport.height * outputScale);
+    canvas.style.width = `${viewport.width}px`;
+    canvas.style.height = `${viewport.height}px`;
+    pageElement.append(canvas);
+    readerElements.viewer.replaceChildren(pageElement);
+
+    const context = canvas.getContext("2d");
+    context.setTransform(outputScale, 0, 0, outputScale, 0, 0);
+    await page.render({ canvasContext: context, viewport }).promise;
+    const textContent = await page.getTextContent();
+    if (state.reader.renderToken !== token) return;
+    renderTextLayer(pageElement, textContent, viewport);
+  } catch (error) {
+    if (state.reader.renderToken !== token) return;
+    readerElements.viewer.innerHTML = `<div class="empty-state">${error.message}</div>`;
+  }
+}
+
+async function openPaperReader(paper) {
+  await closeReaderDocument();
+  showReaderView();
+  renderPapers();
+
+  const sourceUrl = `/api/papers/${paper.id}/file`;
+  state.reader.paperId = paper.id;
+  state.reader.pageNumber = 1;
+  state.reader.pageCount = 0;
+  state.reader.scale = 1.15;
+  state.reader.sourceUrl = sourceUrl;
+  readerElements.title.textContent = paper.title || "原文阅读";
+  readerElements.meta.textContent = [(paper.authors || []).join(", "), paper.year, paper.journal]
+    .filter(Boolean)
+    .join(" · ");
+  readerElements.openButton.href = sourceUrl;
+  readerElements.viewer.innerHTML = `<div class="empty-state">正在打开原文件</div>`;
+  updateReaderControls();
+
+  try {
+    state.reader.loadingTask = pdfjsLib.getDocument(sourceUrl);
+    state.reader.document = await state.reader.loadingTask.promise;
+    state.reader.pageCount = state.reader.document.numPages;
+    await renderCurrentPage();
+    setStatus("原文已打开");
+  } catch (error) {
+    state.reader.pageCount = 0;
+    readerElements.viewer.innerHTML = `<div class="empty-state">没有找到原文件或无法读取 PDF</div>`;
+    setStatus(error.message);
+    updateReaderControls();
+  }
 }
 
 async function loadDrafts() {
@@ -257,11 +422,50 @@ document.querySelector("#draftList").addEventListener("click", (event) => {
   if (draft) fillFormFromDraft(draft);
 });
 
-document.querySelector("#paperList").addEventListener("click", (event) => {
+document.querySelector("#paperList").addEventListener("click", async (event) => {
   const item = event.target.closest("[data-paper-id]");
   if (!item) return;
   const paper = state.papers.find((entry) => entry.id === Number(item.dataset.paperId));
-  if (paper) fillFormFromPaper(paper);
+  if (!paper) return;
+  fillFormFromPaper(paper);
+  await openPaperReader(paper);
+});
+
+document.querySelector("#backToListButton").addEventListener("click", () => {
+  showPaperListView();
+  renderPapers();
+});
+
+document.querySelector("#previousPageButton").addEventListener("click", async () => {
+  if (state.reader.pageNumber <= 1) return;
+  state.reader.pageNumber -= 1;
+  await renderCurrentPage();
+});
+
+document.querySelector("#nextPageButton").addEventListener("click", async () => {
+  if (state.reader.pageNumber >= state.reader.pageCount) return;
+  state.reader.pageNumber += 1;
+  await renderCurrentPage();
+});
+
+document.querySelector("#pageNumberInput").addEventListener("change", async (event) => {
+  const nextPage = Number(event.target.value);
+  if (!Number.isInteger(nextPage) || nextPage < 1 || nextPage > state.reader.pageCount) {
+    updateReaderControls();
+    return;
+  }
+  state.reader.pageNumber = nextPage;
+  await renderCurrentPage();
+});
+
+document.querySelector("#zoomOutButton").addEventListener("click", async () => {
+  state.reader.scale = Math.max(0.7, Number((state.reader.scale - 0.15).toFixed(2)));
+  await renderCurrentPage();
+});
+
+document.querySelector("#zoomInButton").addEventListener("click", async () => {
+  state.reader.scale = Math.min(2.2, Number((state.reader.scale + 0.15).toFixed(2)));
+  await renderCurrentPage();
 });
 
 document.querySelector("#detailForm").addEventListener("submit", async (event) => {
@@ -305,4 +509,3 @@ document.querySelector("#clearFiltersButton").addEventListener("click", async ()
 
 await loadDrafts();
 await loadPapers();
-

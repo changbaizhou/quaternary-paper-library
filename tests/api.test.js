@@ -179,3 +179,69 @@ test("API prefers OCR text when PDF text extraction fails", async () => {
     }
   );
 });
+
+test("API serves the source PDF for a confirmed paper", async () => {
+  await withServer(
+    async (baseUrl) => {
+      const pdfBody = "%PDF-1.4\nsource file\n%%EOF";
+      const form = new FormData();
+      form.append("files", new Blob([pdfBody], { type: "application/pdf" }), "source.pdf");
+
+      const uploadResponse = await fetch(`${baseUrl}/api/uploads`, {
+        method: "POST",
+        body: form
+      });
+      assert.equal(uploadResponse.status, 201);
+      const [draft] = await uploadResponse.json();
+
+      const confirmResponse = await fetch(`${baseUrl}/api/drafts/${draft.id}/confirm`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title: draft.title })
+      });
+      assert.equal(confirmResponse.status, 201);
+      const paper = await confirmResponse.json();
+
+      const fileResponse = await fetch(`${baseUrl}/api/papers/${paper.id}/file`);
+      assert.equal(fileResponse.status, 200);
+      assert.match(fileResponse.headers.get("content-type"), /^application\/pdf/);
+      assert.equal(await fileResponse.text(), pdfBody);
+    },
+    {
+      enableUploadLookup: false,
+      extractPdfText: async () => `
+        Source PDF test paper
+        Abstract
+        This paper tests source file reading in the Quaternary paper library.
+        Keywords: Quaternary
+        Introduction
+      `
+    }
+  );
+});
+
+test("API returns 404 when a confirmed paper has no source file", async () => {
+  await withServer(async (baseUrl) => {
+    const createResponse = await fetch(`${baseUrl}/api/drafts/from-text`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        filename: "paper.txt",
+        text: "Paper without source file\nAbstract\nThis record has metadata but no PDF file."
+      })
+    });
+    assert.equal(createResponse.status, 201);
+    const draft = await createResponse.json();
+
+    const confirmResponse = await fetch(`${baseUrl}/api/drafts/${draft.id}/confirm`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: draft.title })
+    });
+    assert.equal(confirmResponse.status, 201);
+    const paper = await confirmResponse.json();
+
+    const fileResponse = await fetch(`${baseUrl}/api/papers/${paper.id}/file`);
+    assert.equal(fileResponse.status, 404);
+  });
+});

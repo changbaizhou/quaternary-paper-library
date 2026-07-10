@@ -1,6 +1,6 @@
 import express from "express";
 import multer from "multer";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -59,6 +59,18 @@ function mergeMetadata(local, remote) {
 
 function metadataFetch(url, options = {}) {
   return fetch(url, { ...options, signal: AbortSignal.timeout(4500) });
+}
+
+function resolveStoredPdfPath(filesDir, storedPath) {
+  if (!storedPath) return "";
+
+  const filesRoot = path.resolve(filesDir);
+  const resolvedPath = path.resolve(process.cwd(), storedPath);
+  const relative = path.relative(filesRoot, resolvedPath);
+  const outsideFilesDir = relative.startsWith("..") || path.isAbsolute(relative);
+  if (outsideFilesDir || path.extname(resolvedPath).toLowerCase() !== ".pdf") return "";
+
+  return resolvedPath;
 }
 
 async function extractUploadText(filePath, options = {}) {
@@ -162,6 +174,7 @@ export function createApp(options = {}) {
   const app = express();
 
   app.use(express.json({ limit: "2mb" }));
+  app.use("/vendor/pdfjs-dist", express.static(path.join(process.cwd(), "node_modules", "pdfjs-dist")));
   app.use(express.static(config.staticDir));
 
   app.get("/api/health", (_request, response) => {
@@ -239,6 +252,28 @@ export function createApp(options = {}) {
         filters: parseFilters(request.query)
       })
     );
+  });
+
+  app.get("/api/papers/:id/file", (request, response, next) => {
+    try {
+      const paper = repo.getPaper(Number(request.params.id));
+      if (!paper) {
+        response.status(404).json({ error: "Paper not found" });
+        return;
+      }
+
+      const pdfPath = resolveStoredPdfPath(config.filesDir, paper.storedPath);
+      if (!pdfPath || !existsSync(pdfPath)) {
+        response.status(404).json({ error: "Source PDF not found" });
+        return;
+      }
+
+      response.type("application/pdf");
+      response.setHeader("Content-Disposition", `inline; filename="${paper.storedFilename || "paper.pdf"}"`);
+      response.sendFile(pdfPath);
+    } catch (error) {
+      next(error);
+    }
   });
 
   app.get("/api/export/:format", (request, response) => {
