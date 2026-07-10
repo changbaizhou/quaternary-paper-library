@@ -19,3 +19,28 @@ test("frontend loads PDF.js and opens selected papers in the reader", async () =
   assert.match(script, /\/api\/papers\/\$\{paper\.id\}\/file/);
   assert.match(script, /pdfjsLib\.getDocument\(\{\s*url: sourceUrl\s*\}\)/);
 });
+
+test("frontend reader supports continuous lazy scrolling", async () => {
+  const script = await readFile("public/app.js", "utf8");
+
+  assert.match(script, /renderContinuousPages/);
+  assert.match(script, /IntersectionObserver/);
+  assert.match(script, /data-page-number/);
+  assert.match(script, /scrollToPage/);
+});
+
+test("frontend reader uses fit-width high-resolution rendering", async () => {
+  const script = await readFile("public/app.js", "utf8");
+
+  assert.match(script, /calculateFitWidthScale/);
+  assert.match(script, /HIGH_RESOLUTION_SCALE/);
+  assert.match(script, /Math\.max\(window\.devicePixelRatio \|\| 1, HIGH_RESOLUTION_SCALE\)/);
+});
+
+test("frontend reader resets state when returning to the list", async () => {
+  const script = await readFile("public/app.js", "utf8");
+
+  assert.match(script, /closeReaderAndShowList/);
+  assert.match(script, /state\.selectedPaper = null/);
+  assert.match(script, /setStatus\("本地资料库"\)/);
+});

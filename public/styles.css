@@ -401,6 +401,20 @@ textarea {
   box-shadow: 0 2px 10px rgba(20, 34, 36, 0.18);
 }
 
+.pdf-page + .pdf-page {
+  margin-top: 16px;
+}
+
+.pdf-page.loading {
+  display: grid;
+  place-items: center;
+}
+
+.page-loading {
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .pdf-page canvas {
   display: block;
 }

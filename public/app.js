@@ -2,6 +2,11 @@ import * as pdfjsLib from "/vendor/pdfjs-dist/build/pdf.mjs";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = "/vendor/pdfjs-dist/build/pdf.worker.mjs";
 
+const HIGH_RESOLUTION_SCALE = 2;
+const MAX_CANVAS_SCALE = 3;
+const MIN_READER_SCALE = 0.75;
+const MAX_READER_SCALE = 2.6;
+
 const state = {
   drafts: [],
   papers: [],
@@ -13,9 +18,13 @@ const state = {
     paperId: null,
     pageNumber: 1,
     pageCount: 0,
-    scale: 1.15,
+    scale: 1,
     renderToken: 0,
-    sourceUrl: ""
+    sourceUrl: "",
+    observer: null,
+    pageShells: new Map(),
+    renderedPages: new Set(),
+    renderingPages: new Set()
   }
 };
 
@@ -232,16 +241,28 @@ function updateReaderControls() {
   readerElements.nextButton.disabled = pageNumber >= pageCount;
 }
 
+function resetRenderedPages() {
+  if (state.reader.observer) {
+    state.reader.observer.disconnect();
+    state.reader.observer = null;
+  }
+  state.reader.pageShells.clear();
+  state.reader.renderedPages.clear();
+  state.reader.renderingPages.clear();
+}
+
 async function closeReaderDocument() {
   state.reader.renderToken += 1;
-  if (state.reader.loadingTask) {
-    state.reader.loadingTask.destroy();
-    state.reader.loadingTask = null;
+  resetRenderedPages();
+  if (state.reader.loadingTask?.destroy) {
+    await state.reader.loadingTask.destroy().catch(() => {});
   }
-  if (state.reader.document) {
-    await state.reader.document.destroy();
-    state.reader.document = null;
-  }
+  state.reader.loadingTask = null;
+  state.reader.document = null;
+  state.reader.paperId = null;
+  state.reader.pageNumber = 1;
+  state.reader.pageCount = 0;
+  state.reader.sourceUrl = "";
 }
 
 function renderTextLayer(pageElement, textContent, viewport) {
@@ -272,44 +293,173 @@ function renderTextLayer(pageElement, textContent, viewport) {
   }
 }
 
-async function renderCurrentPage() {
-  if (!state.reader.document) return;
+function getViewerContentWidth() {
+  return Math.max(420, readerElements.viewer.clientWidth - 48);
+}
 
-  const token = state.reader.renderToken + 1;
-  state.reader.renderToken = token;
-  const { document: pdfDocument, pageNumber, scale } = state.reader;
-  readerElements.viewer.innerHTML = `<div class="empty-state">正在加载页面</div>`;
-  updateReaderControls();
+function calculateFitWidthScale(page) {
+  const viewport = page.getViewport({ scale: 1 });
+  const scale = getViewerContentWidth() / viewport.width;
+  return Number(Math.min(MAX_READER_SCALE, Math.max(MIN_READER_SCALE, scale)).toFixed(2));
+}
+
+function createPageShell(pageNumber, referenceViewport) {
+  const shell = document.createElement("div");
+  shell.className = "pdf-page loading";
+  shell.setAttribute("data-page-number", String(pageNumber));
+  shell.style.width = `${referenceViewport.width}px`;
+  shell.style.minHeight = `${referenceViewport.height}px`;
+  shell.innerHTML = `<div class="page-loading">第 ${pageNumber} 页</div>`;
+  return shell;
+}
+
+function releasePageShell(pageNumber) {
+  const shell = state.reader.pageShells.get(pageNumber);
+  if (!shell || state.reader.renderingPages.has(pageNumber)) return;
+  if (!state.reader.renderedPages.has(pageNumber)) return;
+  state.reader.renderedPages.delete(pageNumber);
+  shell.classList.add("loading");
+  shell.replaceChildren(Object.assign(document.createElement("div"), {
+    className: "page-loading",
+    textContent: `第 ${pageNumber} 页`
+  }));
+}
+
+async function renderPageShell(pageNumber, token = state.reader.renderToken) {
+  const pdfDocument = state.reader.document;
+  const shell = state.reader.pageShells.get(pageNumber);
+  if (!pdfDocument || !shell) return;
+  if (state.reader.renderedPages.has(pageNumber) || state.reader.renderingPages.has(pageNumber)) return;
+
+  state.reader.renderingPages.add(pageNumber);
+  shell.classList.add("loading");
 
   try {
     const page = await pdfDocument.getPage(pageNumber);
     if (state.reader.renderToken !== token) return;
 
-    const viewport = page.getViewport({ scale });
-    const pageElement = document.createElement("div");
-    pageElement.className = "pdf-page";
-    pageElement.style.width = `${viewport.width}px`;
-    pageElement.style.height = `${viewport.height}px`;
+    const viewport = page.getViewport({ scale: state.reader.scale });
+    shell.style.width = `${viewport.width}px`;
+    shell.style.height = `${viewport.height}px`;
+    shell.style.minHeight = `${viewport.height}px`;
 
     const canvas = document.createElement("canvas");
-    const outputScale = window.devicePixelRatio || 1;
+    const outputScale = Math.min(
+      MAX_CANVAS_SCALE,
+      Math.max(window.devicePixelRatio || 1, HIGH_RESOLUTION_SCALE)
+    );
     canvas.width = Math.floor(viewport.width * outputScale);
     canvas.height = Math.floor(viewport.height * outputScale);
     canvas.style.width = `${viewport.width}px`;
     canvas.style.height = `${viewport.height}px`;
-    pageElement.append(canvas);
-    readerElements.viewer.replaceChildren(pageElement);
 
     const context = canvas.getContext("2d");
     context.setTransform(outputScale, 0, 0, outputScale, 0, 0);
+    shell.replaceChildren(canvas);
+    shell.classList.remove("loading");
+
     await page.render({ canvasContext: context, viewport }).promise;
-    const textContent = await page.getTextContent();
     if (state.reader.renderToken !== token) return;
-    renderTextLayer(pageElement, textContent, viewport);
+
+    const textContent = await page.getTextContent().catch(() => ({ items: [] }));
+    renderTextLayer(shell, textContent, viewport);
+    state.reader.renderedPages.add(pageNumber);
   } catch (error) {
     if (state.reader.renderToken !== token) return;
-    readerElements.viewer.innerHTML = `<div class="empty-state">${error.message}</div>`;
+    shell.classList.add("loading");
+    shell.replaceChildren(Object.assign(document.createElement("div"), {
+      className: "page-loading",
+      textContent: error.message
+    }));
+  } finally {
+    state.reader.renderingPages.delete(pageNumber);
   }
+}
+
+function updateCurrentPageFromScroll() {
+  if (readerElements.readerView.hidden || state.reader.pageShells.size === 0) return;
+
+  const viewerRect = readerElements.viewer.getBoundingClientRect();
+  let bestPage = state.reader.pageNumber || 1;
+  let bestDistance = Number.POSITIVE_INFINITY;
+
+  for (const [pageNumber, shell] of state.reader.pageShells) {
+    const rect = shell.getBoundingClientRect();
+    if (rect.bottom < viewerRect.top || rect.top > viewerRect.bottom) continue;
+    const distance = Math.abs(rect.top - viewerRect.top - 12);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestPage = pageNumber;
+    }
+  }
+
+  if (bestPage !== state.reader.pageNumber) {
+    state.reader.pageNumber = bestPage;
+    updateReaderControls();
+  }
+}
+
+function observeReaderPages(token) {
+  state.reader.observer = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        const pageNumber = Number(entry.target.dataset.pageNumber);
+        if (!pageNumber) continue;
+        if (entry.isIntersecting) {
+          renderPageShell(pageNumber, token);
+        } else {
+          releasePageShell(pageNumber);
+        }
+      }
+      updateCurrentPageFromScroll();
+    },
+    {
+      root: readerElements.viewer,
+      rootMargin: "900px 0px",
+      threshold: 0.01
+    }
+  );
+
+  for (const shell of state.reader.pageShells.values()) {
+    state.reader.observer.observe(shell);
+  }
+}
+
+function scrollToPage(pageNumber, behavior = "smooth") {
+  const nextPage = Math.min(Math.max(Number(pageNumber) || 1, 1), state.reader.pageCount || 1);
+  const shell = state.reader.pageShells.get(nextPage);
+  if (!shell) return;
+
+  state.reader.pageNumber = nextPage;
+  updateReaderControls();
+  renderPageShell(nextPage);
+  shell.scrollIntoView({ block: "start", behavior });
+}
+
+async function renderContinuousPages({ preservePage = false } = {}) {
+  const pdfDocument = state.reader.document;
+  if (!pdfDocument) return;
+
+  const targetPage = preservePage ? state.reader.pageNumber : 1;
+  const token = state.reader.renderToken + 1;
+  state.reader.renderToken = token;
+  resetRenderedPages();
+  readerElements.viewer.replaceChildren();
+
+  const firstPage = await pdfDocument.getPage(1);
+  if (!preservePage) state.reader.scale = calculateFitWidthScale(firstPage);
+  const referenceViewport = firstPage.getViewport({ scale: state.reader.scale });
+
+  for (let pageNumber = 1; pageNumber <= state.reader.pageCount; pageNumber += 1) {
+    const shell = createPageShell(pageNumber, referenceViewport);
+    state.reader.pageShells.set(pageNumber, shell);
+    readerElements.viewer.append(shell);
+  }
+
+  observeReaderPages(token);
+  state.reader.pageNumber = Math.min(Math.max(targetPage, 1), state.reader.pageCount || 1);
+  updateReaderControls();
+  requestAnimationFrame(() => scrollToPage(state.reader.pageNumber, "auto"));
 }
 
 async function openPaperReader(paper) {
@@ -321,7 +471,7 @@ async function openPaperReader(paper) {
   state.reader.paperId = paper.id;
   state.reader.pageNumber = 1;
   state.reader.pageCount = 0;
-  state.reader.scale = 1.15;
+  state.reader.scale = 1;
   state.reader.sourceUrl = sourceUrl;
   readerElements.title.textContent = paper.title || "原文阅读";
   readerElements.meta.textContent = [(paper.authors || []).join(", "), paper.year, paper.journal]
@@ -335,7 +485,7 @@ async function openPaperReader(paper) {
     state.reader.loadingTask = pdfjsLib.getDocument({ url: sourceUrl });
     state.reader.document = await state.reader.loadingTask.promise;
     state.reader.pageCount = state.reader.document.numPages;
-    await renderCurrentPage();
+    await renderContinuousPages();
     setStatus("原文已打开");
   } catch (error) {
     state.reader.pageCount = 0;
@@ -343,6 +493,15 @@ async function openPaperReader(paper) {
     setStatus(error.message);
     updateReaderControls();
   }
+}
+
+async function closeReaderAndShowList() {
+  await closeReaderDocument();
+  state.selectedPaper = null;
+  readerElements.viewer.innerHTML = `<div class="empty-state">选择论文后阅读原文件</div>`;
+  showPaperListView();
+  renderPapers();
+  setStatus("本地资料库");
 }
 
 async function loadDrafts() {
@@ -431,42 +590,42 @@ document.querySelector("#paperList").addEventListener("click", async (event) => 
   await openPaperReader(paper);
 });
 
-document.querySelector("#backToListButton").addEventListener("click", () => {
-  showPaperListView();
-  renderPapers();
+document.querySelector("#backToListButton").addEventListener("click", async () => {
+  await closeReaderAndShowList();
 });
 
-document.querySelector("#previousPageButton").addEventListener("click", async () => {
+document.querySelector("#previousPageButton").addEventListener("click", () => {
   if (state.reader.pageNumber <= 1) return;
-  state.reader.pageNumber -= 1;
-  await renderCurrentPage();
+  scrollToPage(state.reader.pageNumber - 1);
 });
 
-document.querySelector("#nextPageButton").addEventListener("click", async () => {
+document.querySelector("#nextPageButton").addEventListener("click", () => {
   if (state.reader.pageNumber >= state.reader.pageCount) return;
-  state.reader.pageNumber += 1;
-  await renderCurrentPage();
+  scrollToPage(state.reader.pageNumber + 1);
 });
 
-document.querySelector("#pageNumberInput").addEventListener("change", async (event) => {
+document.querySelector("#pageNumberInput").addEventListener("change", (event) => {
   const nextPage = Number(event.target.value);
   if (!Number.isInteger(nextPage) || nextPage < 1 || nextPage > state.reader.pageCount) {
     updateReaderControls();
     return;
   }
-  state.reader.pageNumber = nextPage;
-  await renderCurrentPage();
+  scrollToPage(nextPage);
 });
 
 document.querySelector("#zoomOutButton").addEventListener("click", async () => {
-  state.reader.scale = Math.max(0.7, Number((state.reader.scale - 0.15).toFixed(2)));
-  await renderCurrentPage();
+  if (!state.reader.document) return;
+  state.reader.scale = Math.max(MIN_READER_SCALE, Number((state.reader.scale - 0.15).toFixed(2)));
+  await renderContinuousPages({ preservePage: true });
 });
 
 document.querySelector("#zoomInButton").addEventListener("click", async () => {
-  state.reader.scale = Math.min(2.2, Number((state.reader.scale + 0.15).toFixed(2)));
-  await renderCurrentPage();
+  if (!state.reader.document) return;
+  state.reader.scale = Math.min(MAX_READER_SCALE, Number((state.reader.scale + 0.15).toFixed(2)));
+  await renderContinuousPages({ preservePage: true });
 });
+
+readerElements.viewer.addEventListener("scroll", updateCurrentPageFromScroll);
 
 document.querySelector("#detailForm").addEventListener("submit", async (event) => {
   event.preventDefault();
