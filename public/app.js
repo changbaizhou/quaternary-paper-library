@@ -6,6 +6,7 @@ const HIGH_RESOLUTION_SCALE = 2;
 const MAX_CANVAS_SCALE = 3;
 const MIN_READER_SCALE = 0.75;
 const MAX_READER_SCALE = 2.6;
+const AUTO_TRANSLATE_DELAY_MS = 450;
 
 const state = {
   drafts: [],
@@ -26,7 +27,11 @@ const state = {
     observer: null,
     pageShells: new Map(),
     renderedPages: new Set(),
-    renderingPages: new Set()
+    renderingPages: new Set(),
+    autoTranslateTimer: null,
+    lastTranslatedSelection: "",
+    pendingTranslationSelection: "",
+    translationRequestId: 0
   }
 };
 
@@ -103,8 +108,17 @@ function patchPaperInState(updatedPaper) {
   if (state.selectedPaper?.id === updatedPaper.id) state.selectedPaper = updatedPaper;
 }
 
+function nodeIsInsideReader(node) {
+  if (!node) return false;
+  const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+  return Boolean(element && readerElements.viewer.contains(element));
+}
+
 function getSelectedReaderText() {
-  return window.getSelection().toString().replace(/\s+/g, " ").trim();
+  const selection = window.getSelection();
+  if (!selection?.rangeCount) return "";
+  if (!nodeIsInsideReader(selection.anchorNode) || !nodeIsInsideReader(selection.focusNode)) return "";
+  return selection.toString().replace(/\s+/g, " ").trim();
 }
 
 async function api(path, options = {}) {
@@ -266,7 +280,20 @@ function showReaderView() {
 function updateTranslationPanel(statusText, resultText = "", { hidden = false } = {}) {
   readerElements.translationPanel.hidden = hidden;
   readerElements.translationStatusText.textContent = statusText;
-  readerElements.translationResultText.textContent = resultText || "在原文中选中文字后点击翻译。";
+  readerElements.translationResultText.textContent = resultText || "在原文中选中文字后自动翻译。";
+}
+
+function clearAutoTranslateTimer() {
+  if (!state.reader.autoTranslateTimer) return;
+  window.clearTimeout(state.reader.autoTranslateTimer);
+  state.reader.autoTranslateTimer = null;
+}
+
+function resetTranslationState() {
+  clearAutoTranslateTimer();
+  state.reader.lastTranslatedSelection = "";
+  state.reader.pendingTranslationSelection = "";
+  state.reader.translationRequestId += 1;
 }
 
 function updateBookmarkControls() {
@@ -316,15 +343,24 @@ function recordLastReadPage(pageNumber) {
   void saveReadingProgress({ lastReadPage: page });
 }
 
-async function translateSelectedText() {
+async function translateSelectedText({ selectedText = getSelectedReaderText(), allowDuplicate = true } = {}) {
   if (!state.reader.document) return;
-  const selectedText = getSelectedReaderText();
+  selectedText = String(selectedText || "").replace(/\s+/g, " ").trim();
   if (!selectedText) {
     updateTranslationPanel("未选择文本", "请先在 PDF 中选中文字。");
     setStatus("请先在 PDF 中选中文字");
     return;
   }
+  if (
+    !allowDuplicate &&
+    (selectedText === state.reader.lastTranslatedSelection || selectedText === state.reader.pendingTranslationSelection)
+  ) {
+    return;
+  }
 
+  const requestId = state.reader.translationRequestId + 1;
+  state.reader.translationRequestId = requestId;
+  state.reader.pendingTranslationSelection = selectedText;
   updateTranslationPanel(`已选择 ${selectedText.length} 个字符`, "正在翻译...");
   setStatus("正在翻译选中文本");
   readerElements.translateSelectionButton.disabled = true;
@@ -334,14 +370,39 @@ async function translateSelectedText() {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ text: selectedText, targetLanguage: "zh-CN" })
     });
+    if (requestId !== state.reader.translationRequestId) return;
+    state.reader.lastTranslatedSelection = selectedText;
     updateTranslationPanel(`已翻译 ${selectedText.length} 个字符`, result.translatedText || "没有返回译文");
     setStatus("翻译完成");
   } catch (error) {
+    if (requestId !== state.reader.translationRequestId) return;
     updateTranslationPanel("翻译失败", error.message);
     setStatus(error.message);
   } finally {
-    updateBookmarkControls();
+    if (state.reader.pendingTranslationSelection === selectedText) {
+      state.reader.pendingTranslationSelection = "";
+    }
+    if (requestId === state.reader.translationRequestId) updateBookmarkControls();
   }
+}
+
+function scheduleSelectedTextTranslation() {
+  if (!state.reader.document || readerElements.readerView.hidden) return;
+  const selectedText = getSelectedReaderText();
+  if (!selectedText) {
+    clearAutoTranslateTimer();
+    state.reader.pendingTranslationSelection = "";
+    return;
+  }
+  if (selectedText === state.reader.lastTranslatedSelection || selectedText === state.reader.pendingTranslationSelection) {
+    return;
+  }
+
+  clearAutoTranslateTimer();
+  state.reader.autoTranslateTimer = window.setTimeout(() => {
+    state.reader.autoTranslateTimer = null;
+    void translateSelectedText({ selectedText, allowDuplicate: false });
+  }, AUTO_TRANSLATE_DELAY_MS);
 }
 
 function resetRenderedPages() {
@@ -356,6 +417,7 @@ function resetRenderedPages() {
 
 async function closeReaderDocument() {
   state.reader.renderToken += 1;
+  resetTranslationState();
   resetRenderedPages();
   if (state.reader.loadingTask?.destroy) {
     await state.reader.loadingTask.destroy().catch(() => {});
@@ -765,6 +827,7 @@ document.querySelector("#goBookmarkButton").addEventListener("click", () => {
 });
 
 document.querySelector("#translateSelectionButton").addEventListener("click", translateSelectedText);
+document.addEventListener("selectionchange", scheduleSelectedTextTranslation);
 
 readerElements.viewer.addEventListener("scroll", updateCurrentPageFromScroll);
 

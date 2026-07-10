@@ -92,3 +92,13 @@ test("frontend reader exposes selected text translation controls", async () => {
   assert.match(script, /translateSelectedText/);
   assert.match(css, /\.translation-panel/);
 });
+
+test("frontend reader automatically translates selected PDF text", async () => {
+  const script = await readFile("public/app.js", "utf8");
+
+  assert.match(script, /AUTO_TRANSLATE_DELAY_MS/);
+  assert.match(script, /scheduleSelectedTextTranslation/);
+  assert.match(script, /document\.addEventListener\("selectionchange", scheduleSelectedTextTranslation\)/);
+  assert.match(script, /lastTranslatedSelection/);
+  assert.match(script, /pendingTranslationSelection/);
+});
