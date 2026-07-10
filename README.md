@@ -92,10 +92,21 @@ library/
 
 ## 翻译
 
-PDF 阅读器支持选中文本后在线翻译。翻译默认关闭，需要启动前设置：
+PDF 阅读器支持选中文本后在线翻译。翻译默认关闭，需要启动前设置。推荐使用 Gemini：
 
 ```powershell
 $env:QPL_TRANSLATION_ENABLED="1"
+$env:QPL_TRANSLATION_PROVIDER="gemini"
+$env:GEMINI_API_KEY="你的 Gemini API Key"
+$env:QPL_GEMINI_MODEL="gemini-3.5-flash"
+npm start
+```
+
+也可以继续使用 OpenAI：
+
+```powershell
+$env:QPL_TRANSLATION_ENABLED="1"
+$env:QPL_TRANSLATION_PROVIDER="openai"
 $env:OPENAI_API_KEY="你的 OpenAI API Key"
 $env:QPL_TRANSLATION_MODEL="gpt-4o-mini"
 npm start

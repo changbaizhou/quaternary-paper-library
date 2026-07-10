@@ -281,9 +281,13 @@ export function createApp(options = {}) {
         },
         {
           enabled: config.translationEnabled ?? process.env.QPL_TRANSLATION_ENABLED === "1",
+          provider: config.translationProvider ?? process.env.QPL_TRANSLATION_PROVIDER ?? "openai",
           apiKey: config.openaiApiKey ?? process.env.OPENAI_API_KEY,
           model: config.translationModel ?? process.env.QPL_TRANSLATION_MODEL,
           endpoint: config.translationEndpoint,
+          geminiApiKey: config.geminiApiKey ?? process.env.GEMINI_API_KEY,
+          geminiModel: config.geminiModel ?? process.env.QPL_GEMINI_MODEL,
+          geminiEndpoint: config.geminiEndpoint,
           fetchImpl: config.translationFetch
         }
       );

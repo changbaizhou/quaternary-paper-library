@@ -326,6 +326,22 @@ test("API translation requires an OpenAI API key", async () => {
   );
 });
 
+test("API Gemini translation requires a Gemini API key", async () => {
+  await withServer(
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/translate`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "Selected paper text." })
+      });
+
+      assert.equal(response.status, 503);
+      assert.match((await response.json()).error, /GEMINI_API_KEY/);
+    },
+    { translationEnabled: true, translationProvider: "gemini", geminiApiKey: "" }
+  );
+});
+
 test("API translation returns provider result", async () => {
   await withServer(
     async (baseUrl) => {
@@ -354,6 +370,44 @@ test("API translation returns provider result", async () => {
         const payload = JSON.parse(options.body);
         assert.equal(payload.model, "test-model");
         assert.match(JSON.stringify(payload.input), /loess-paleosol/);
+        return new Response(JSON.stringify({ output_text: "黄土-古土壤序列记录了河流贯通过程。" }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+    }
+  );
+});
+
+test("API Gemini translation returns provider result", async () => {
+  await withServer(
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/translate`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          text: "The loess-paleosol sequence records river integration.",
+          targetLanguage: "zh-CN"
+        })
+      });
+
+      assert.equal(response.status, 200);
+      const body = await response.json();
+      assert.equal(body.translatedText, "黄土-古土壤序列记录了河流贯通过程。");
+      assert.equal(body.provider, "gemini");
+    },
+    {
+      translationEnabled: true,
+      translationProvider: "gemini",
+      geminiApiKey: "test-gemini-key",
+      geminiModel: "gemini-test-model",
+      translationFetch: async (url, options) => {
+        assert.equal(url, "https://generativelanguage.googleapis.com/v1beta/interactions");
+        assert.equal(options.method, "POST");
+        assert.equal(options.headers["x-goog-api-key"], "test-gemini-key");
+        const payload = JSON.parse(options.body);
+        assert.equal(payload.model, "gemini-test-model");
+        assert.match(payload.input, /loess-paleosol/);
         return new Response(JSON.stringify({ output_text: "黄土-古土壤序列记录了河流贯通过程。" }), {
           status: 200,
           headers: { "content-type": "application/json" }
