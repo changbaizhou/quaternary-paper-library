@@ -44,3 +44,24 @@ test("frontend reader resets state when returning to the list", async () => {
   assert.match(script, /state\.selectedPaper = null/);
   assert.match(script, /setStatus\("本地资料库"\)/);
 });
+
+test("app shell exposes refined visual layout landmarks", async () => {
+  const html = await readFile("public/index.html", "utf8");
+
+  assert.match(html, /class="brand-block"/);
+  assert.match(html, /class="[^"]*top-actions[^"]*"/);
+  assert.match(html, /class="panel-section search-section"/);
+  assert.match(html, /class="detail-section basic-section"/);
+  assert.match(html, /class="detail-section notes-section"/);
+});
+
+test("paper cards and stylesheet expose polished UI primitives", async () => {
+  const script = await readFile("public/app.js", "utf8");
+  const css = await readFile("public/styles.css", "utf8");
+
+  assert.match(script, /paper-title/);
+  assert.match(script, /paper-card-footer/);
+  assert.match(css, /--surface-raised/);
+  assert.match(css, /\.paper-title/);
+  assert.match(css, /\.detail-section/);
+});

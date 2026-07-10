@@ -107,7 +107,8 @@ function renderDrafts() {
     .map(
       (draft) => `
         <button class="draft-item" data-draft-id="${draft.id}">
-          <h3>${draft.title || draft.originalFilename || "未识别题名"}</h3>
+          <span class="draft-badge">待确认</span>
+          <h3 class="draft-title">${draft.title || draft.originalFilename || "未识别题名"}</h3>
           <div class="meta-line">${draft.doi || "未识别 DOI"}</div>
         </button>
       `
@@ -131,11 +132,18 @@ function renderPapers() {
         ...(paper.methods || []).map((item) => chip(item, "method"))
       ].join("");
       const selected = state.selectedPaper?.id === paper.id ? " selected" : "";
+      const meta = [(paper.authors || []).join(", "), paper.year, paper.journal].filter(Boolean).join(" · ");
       return `
         <article class="paper-item${selected}" data-paper-id="${paper.id}">
-          <h3>${paper.title || "未命名论文"}</h3>
-          <div class="meta-line">${(paper.authors || []).join(", ")} · ${paper.year || ""} · ${paper.journal || ""}</div>
-          <div class="chip-row">${chips}</div>
+          <div class="paper-card-main">
+            <h3 class="paper-title">${paper.title || "未命名论文"}</h3>
+            <div class="paper-meta">${meta || "未填写作者或来源"}</div>
+          </div>
+          <div class="chip-row paper-taxonomy">${chips}</div>
+          <div class="paper-card-footer">
+            <span>${paper.readingStatus || "to-read"}</span>
+            <span>打开原文</span>
+          </div>
         </article>
       `;
     })
