@@ -102,6 +102,15 @@ $env:QPL_GEMINI_MODEL="gemini-3.5-flash"
 npm start
 ```
 
+如果本机直连 Google API 超时，但浏览器或代理能访问，可以让 Node 也走本地代理：
+
+```powershell
+$env:NODE_USE_ENV_PROXY="1"
+$env:HTTPS_PROXY="http://127.0.0.1:10808"
+$env:HTTP_PROXY="http://127.0.0.1:10808"
+npm start
+```
+
 也可以继续使用 OpenAI：
 
 ```powershell

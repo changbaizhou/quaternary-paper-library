@@ -402,16 +402,26 @@ test("API Gemini translation returns provider result", async () => {
       geminiApiKey: "test-gemini-key",
       geminiModel: "gemini-test-model",
       translationFetch: async (url, options) => {
-        assert.equal(url, "https://generativelanguage.googleapis.com/v1beta/interactions");
+        assert.equal(url, "https://generativelanguage.googleapis.com/v1beta/models/gemini-test-model:generateContent");
         assert.equal(options.method, "POST");
         assert.equal(options.headers["x-goog-api-key"], "test-gemini-key");
         const payload = JSON.parse(options.body);
-        assert.equal(payload.model, "gemini-test-model");
-        assert.match(payload.input, /loess-paleosol/);
-        return new Response(JSON.stringify({ output_text: "黄土-古土壤序列记录了河流贯通过程。" }), {
-          status: 200,
-          headers: { "content-type": "application/json" }
-        });
+        assert.match(payload.contents[0].parts[0].text, /loess-paleosol/);
+        return new Response(
+          JSON.stringify({
+            candidates: [
+              {
+                content: {
+                  parts: [{ text: "黄土-古土壤序列记录了河流贯通过程。" }]
+                }
+              }
+            ]
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          }
+        );
       }
     }
   );

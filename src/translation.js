@@ -47,27 +47,32 @@ ${text}`;
 async function translateWithOpenAI({ text, targetLanguage, options, fetchImpl }) {
   const endpoint = options.endpoint || "https://api.openai.com/v1/responses";
   const model = options.model || "gpt-4o-mini";
-  const response = await fetchImpl(endpoint, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${options.apiKey}`,
-      "content-type": "application/json"
-    },
-    body: JSON.stringify({
-      model,
-      input: [
-        {
-          role: "system",
-          content:
-            "You are an academic translator for Quaternary geology papers. Translate the user's selected text into clear Simplified Chinese. Preserve technical terms, numbers, citations, units, and geological time names."
-        },
-        {
-          role: "user",
-          content: `Target language: ${targetLanguage}\n\nSelected text:\n${text}`
-        }
-      ]
-    })
-  });
+  let response;
+  try {
+    response = await fetchImpl(endpoint, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${options.apiKey}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        model,
+        input: [
+          {
+            role: "system",
+            content:
+              "You are an academic translator for Quaternary geology papers. Translate the user's selected text into clear Simplified Chinese. Preserve technical terms, numbers, citations, units, and geological time names."
+          },
+          {
+            role: "user",
+            content: `Target language: ${targetLanguage}\n\nSelected text:\n${text}`
+          }
+        ]
+      })
+    });
+  } catch {
+    throw new TranslationError(502, "翻译服务暂时不可用");
+  }
 
   if (!response.ok) throw new TranslationError(502, "翻译服务暂时不可用");
 
@@ -79,19 +84,33 @@ async function translateWithOpenAI({ text, targetLanguage, options, fetchImpl })
 }
 
 async function translateWithGemini({ text, targetLanguage, options, fetchImpl }) {
-  const endpoint = options.geminiEndpoint || "https://generativelanguage.googleapis.com/v1beta/interactions";
-  const model = options.geminiModel || "gemini-3.5-flash";
-  const response = await fetchImpl(endpoint, {
-    method: "POST",
-    headers: {
-      "x-goog-api-key": options.geminiApiKey,
-      "content-type": "application/json"
-    },
-    body: JSON.stringify({
-      model,
-      input: translationPrompt(text, targetLanguage)
-    })
-  });
+  const model = (options.geminiModel || "gemini-3.5-flash").replace(/^models\//, "");
+  const endpoint =
+    options.geminiEndpoint ||
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+  let response;
+  try {
+    response = await fetchImpl(endpoint, {
+      method: "POST",
+      headers: {
+        "x-goog-api-key": options.geminiApiKey,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: "user",
+            parts: [{ text: translationPrompt(text, targetLanguage) }]
+          }
+        ],
+        generationConfig: {
+          temperature: 0.2
+        }
+      })
+    });
+  } catch {
+    throw new TranslationError(502, "翻译服务暂时不可用");
+  }
 
   if (!response.ok) throw new TranslationError(502, "翻译服务暂时不可用");
 
