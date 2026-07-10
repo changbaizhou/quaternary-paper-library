@@ -8,10 +8,11 @@ import { defaultConfig } from "./config.js";
 import { initDb } from "./database.js";
 import { exportBibtex, exportCsv, exportMarkdown } from "./exporters.js";
 import { lookupDoiMetadata, lookupTitleMetadata } from "./metadata.js";
+import { extractOcrText as defaultExtractOcrText } from "./ocr.js";
 import {
   detectDoi,
   decodePossiblyMojibakeFilename,
-  extractPdfText,
+  extractPdfText as defaultExtractPdfText,
   inferAuthorsFromFilename,
   inferTitleFromText,
   inferTitleFromFilename,
@@ -58,6 +59,31 @@ function mergeMetadata(local, remote) {
 
 function metadataFetch(url, options = {}) {
   return fetch(url, { ...options, signal: AbortSignal.timeout(4500) });
+}
+
+async function extractUploadText(filePath, options = {}) {
+  const extractPdfText = options.extractPdfText || defaultExtractPdfText;
+  const extractOcrText = options.extractOcrText || defaultExtractOcrText;
+  let text = "";
+
+  try {
+    text = await extractPdfText(filePath);
+  } catch (error) {
+    text = `PDF text extraction failed: ${error.message}`;
+  }
+
+  if (!isPoorTextExtraction(text)) return text;
+
+  try {
+    const ocrResult = await extractOcrText(filePath, options.ocr || {});
+    if (ocrResult?.text) {
+      return [ocrResult.text, text].filter(Boolean).join("\n\n");
+    }
+  } catch {
+    // OCR is a best-effort fallback. Keep the original PDF extraction result.
+  }
+
+  return text;
 }
 
 async function createDraftFromText({
@@ -128,6 +154,7 @@ function parseFilters(query) {
 
 export function createApp(options = {}) {
   const config = { ...defaultConfig, ...options };
+  const enableUploadLookup = config.enableUploadLookup ?? true;
   mkdirSync(config.filesDir, { recursive: true });
   mkdirSync(path.dirname(config.dbPath), { recursive: true });
   initDb(config.dbPath);
@@ -169,12 +196,11 @@ export function createApp(options = {}) {
         const targetPath = path.join(targetDir, storedFilename);
         writeFileSync(targetPath, file.buffer);
 
-        let text = "";
-        try {
-          text = await extractPdfText(targetPath);
-        } catch (error) {
-          text = `PDF text extraction failed: ${error.message}`;
-        }
+        const text = await extractUploadText(targetPath, {
+          extractPdfText: config.extractPdfText,
+          extractOcrText: config.extractOcrText,
+          ocr: config.ocr
+        });
 
         const draft = await createDraftFromText({
           repo,
@@ -182,7 +208,7 @@ export function createApp(options = {}) {
           filename: decodedOriginalName,
           storedFilename,
           storedPath: path.relative(process.cwd(), targetPath),
-          enableLookup: true
+          enableLookup: enableUploadLookup
         });
         drafts.push(draft);
       }

@@ -15,6 +15,7 @@ import {
   parseKeywords,
   parseYear
 } from "../src/pdfExtract.js";
+import { extractOcrText } from "../src/ocr.js";
 import { classifyText } from "../src/taxonomy.js";
 
 const dbPath = process.argv[2] || path.join("library", "library.sqlite");
@@ -56,7 +57,20 @@ function searchText(paper) {
     .toLowerCase();
 }
 
-function reprocess(text, filename = "") {
+async function maybeEnhanceWithOcr(text, storedPath = "") {
+  if (!isPoorTextExtraction(text) || !storedPath) return text;
+
+  const absolutePath = path.resolve(storedPath);
+  if (!existsSync(absolutePath)) return text;
+
+  const ocrResult = await extractOcrText(absolutePath);
+  if (!ocrResult.text) return text;
+
+  return [ocrResult.text, text].filter(Boolean).join("\n\n");
+}
+
+async function reprocess(text, filename = "", storedPath = "") {
+  text = await maybeEnhanceWithOcr(text, storedPath);
   const decodedFilename = decodePossiblyMojibakeFilename(filename);
   const doi = detectDoi(text);
   const title = inferTitleFromText(text) || inferTitleFromFilename(decodedFilename);
@@ -86,7 +100,8 @@ function reprocess(text, filename = "") {
     suggestedKeywords,
     classification: result.classification,
     confidence: result.confidence,
-    evidence: result.evidence
+    evidence: result.evidence,
+    extractedText: text
   };
 }
 
@@ -110,7 +125,7 @@ const updateDraft = db.prepare(`
   UPDATE drafts
   SET doi = ?, title = ?, authors_json = ?, journal = ?, year = ?, abstract = ?,
       author_keywords_json = ?, suggested_keywords_json = ?, classification_json = ?,
-      confidence_json = ?, evidence_json = ?, original_filename = ?
+      confidence_json = ?, evidence_json = ?, extracted_text = ?, original_filename = ?
   WHERE id = ?
 `);
 
@@ -124,7 +139,11 @@ const updatePaper = db.prepare(`
 `);
 
 for (const draft of drafts) {
-  const next = reprocess(draft.extracted_text || "", draft.original_filename || draft.stored_filename || "");
+  const next = await reprocess(
+    draft.extracted_text || "",
+    draft.original_filename || draft.stored_filename || "",
+    draft.stored_path || ""
+  );
   updateDraft.run(
     next.doi,
     next.title,
@@ -137,6 +156,7 @@ for (const draft of drafts) {
     JSON.stringify(next.classification),
     JSON.stringify(next.confidence),
     JSON.stringify(next.evidence),
+    next.extractedText,
     decodePossiblyMojibakeFilename(draft.original_filename || draft.stored_filename || ""),
     draft.id
   );

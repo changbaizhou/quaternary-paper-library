@@ -6,12 +6,13 @@ import os from "node:os";
 
 import { createApp } from "../src/server.js";
 
-async function withServer(callback) {
+async function withServer(callback, overrides = {}) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-api-"));
   const app = createApp({
     dbPath: path.join(dir, "library.sqlite"),
     filesDir: path.join(dir, "files"),
-    staticDir: path.resolve("public")
+    staticDir: path.resolve("public"),
+    ...overrides
   });
   const server = app.listen(0);
   const port = server.address().port;
@@ -97,4 +98,84 @@ test("API falls back to decoded filename when extracted PDF text is sparse", asy
     assert.deepEqual(draft.classification.periods, ["Quaternary"]);
     assert.match(draft.abstract, /扫描版/);
   });
+});
+
+test("API enriches sparse uploaded PDF text with OCR output", async () => {
+  let ocrCalled = false;
+
+  await withServer(
+    async (baseUrl) => {
+      const form = new FormData();
+      form.append("files", new Blob(["fake pdf"], { type: "application/pdf" }), "scan.pdf");
+
+      const createResponse = await fetch(`${baseUrl}/api/uploads`, {
+        method: "POST",
+        body: form
+      });
+
+      assert.equal(createResponse.status, 201);
+      const [draft] = await createResponse.json();
+      assert.equal(ocrCalled, true);
+      assert.equal(draft.title, "Late Quaternary evolution of the Henan Plain");
+      assert.ok(draft.classification.regions.includes("Henan Plain"));
+      assert.ok(draft.extractedText.includes("optical character recognition"));
+    },
+    {
+      enableUploadLookup: false,
+      extractPdfText: async () => "\n\n\n",
+      extractOcrText: async () => {
+        ocrCalled = true;
+        return {
+          used: true,
+          reason: "",
+          pages: 1,
+          text: `
+            Late Quaternary evolution of the Henan Plain
+            Abstract
+            This scanned paper uses optical character recognition to identify Quaternary
+            geological evolution in the Henan Plain from regional sediment records.
+            Keywords: Quaternary; Henan Plain; OCR
+            Introduction
+          `
+        };
+      }
+    }
+  );
+});
+
+test("API prefers OCR text when PDF text extraction fails", async () => {
+  await withServer(
+    async (baseUrl) => {
+      const form = new FormData();
+      form.append("files", new Blob(["fake pdf"], { type: "application/pdf" }), "scan.pdf");
+
+      const createResponse = await fetch(`${baseUrl}/api/uploads`, {
+        method: "POST",
+        body: form
+      });
+
+      assert.equal(createResponse.status, 201);
+      const [draft] = await createResponse.json();
+      assert.equal(draft.title, "Scanned Quaternary record from the Yellow River Basin");
+      assert.notEqual(draft.title, "PDF text extraction failed: invalid pdf");
+    },
+    {
+      enableUploadLookup: false,
+      extractPdfText: async () => {
+        throw new Error("invalid pdf");
+      },
+      extractOcrText: async () => ({
+        used: true,
+        reason: "",
+        pages: 1,
+        text: `
+          Scanned Quaternary record from the Yellow River Basin
+          Abstract
+          Optical character recognition recovered enough text for metadata parsing.
+          Keywords: Quaternary; Yellow River basin
+          Introduction
+        `
+      })
+    }
+  );
 });
