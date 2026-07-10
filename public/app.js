@@ -70,7 +70,11 @@ const readerElements = {
   nextButton: document.querySelector("#nextPageButton"),
   setBookmarkButton: document.querySelector("#setBookmarkButton"),
   goBookmarkButton: document.querySelector("#goBookmarkButton"),
-  bookmarkStatusText: document.querySelector("#bookmarkStatusText")
+  bookmarkStatusText: document.querySelector("#bookmarkStatusText"),
+  translateSelectionButton: document.querySelector("#translateSelectionButton"),
+  translationPanel: document.querySelector("#translationPanel"),
+  translationStatusText: document.querySelector("#translationStatusText"),
+  translationResultText: document.querySelector("#translationResultText")
 };
 
 function splitList(value) {
@@ -97,6 +101,10 @@ function patchPaperInState(updatedPaper) {
   if (!updatedPaper?.id) return;
   state.papers = state.papers.map((paper) => (paper.id === updatedPaper.id ? updatedPaper : paper));
   if (state.selectedPaper?.id === updatedPaper.id) state.selectedPaper = updatedPaper;
+}
+
+function getSelectedReaderText() {
+  return window.getSelection().toString().replace(/\s+/g, " ").trim();
 }
 
 async function api(path, options = {}) {
@@ -255,12 +263,19 @@ function showReaderView() {
   readerElements.readerView.hidden = false;
 }
 
+function updateTranslationPanel(statusText, resultText = "", { hidden = false } = {}) {
+  readerElements.translationPanel.hidden = hidden;
+  readerElements.translationStatusText.textContent = statusText;
+  readerElements.translationResultText.textContent = resultText || "在原文中选中文字后点击翻译。";
+}
+
 function updateBookmarkControls() {
   const hasDocument = Boolean(state.reader.document);
   const bookmarkPage = normalizeReaderPage(state.reader.bookmarkPage);
   readerElements.setBookmarkButton.disabled = !hasDocument;
   readerElements.goBookmarkButton.disabled = !hasDocument || !bookmarkPage;
   readerElements.bookmarkStatusText.textContent = bookmarkPage ? `书签 第 ${bookmarkPage} 页` : "未设书签";
+  readerElements.translateSelectionButton.disabled = !hasDocument;
 }
 
 function updateReaderControls() {
@@ -299,6 +314,34 @@ function recordLastReadPage(pageNumber) {
   state.reader.lastReadPage = page;
   updateBookmarkControls();
   void saveReadingProgress({ lastReadPage: page });
+}
+
+async function translateSelectedText() {
+  if (!state.reader.document) return;
+  const selectedText = getSelectedReaderText();
+  if (!selectedText) {
+    updateTranslationPanel("未选择文本", "请先在 PDF 中选中文字。");
+    setStatus("请先在 PDF 中选中文字");
+    return;
+  }
+
+  updateTranslationPanel(`已选择 ${selectedText.length} 个字符`, "正在翻译...");
+  setStatus("正在翻译选中文本");
+  readerElements.translateSelectionButton.disabled = true;
+  try {
+    const result = await api("/api/translate", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: selectedText, targetLanguage: "zh-CN" })
+    });
+    updateTranslationPanel(`已翻译 ${selectedText.length} 个字符`, result.translatedText || "没有返回译文");
+    setStatus("翻译完成");
+  } catch (error) {
+    updateTranslationPanel("翻译失败", error.message);
+    setStatus(error.message);
+  } finally {
+    updateBookmarkControls();
+  }
 }
 
 function resetRenderedPages() {
@@ -548,6 +591,7 @@ async function openPaperReader(paper) {
     .join(" · ");
   readerElements.openButton.href = sourceUrl;
   readerElements.viewer.innerHTML = `<div class="empty-state">正在打开原文件</div>`;
+  updateTranslationPanel("未选择文本", "", { hidden: true });
   updateReaderControls();
 
   try {
@@ -574,6 +618,7 @@ async function closeReaderAndShowList() {
   await closeReaderDocument();
   state.selectedPaper = null;
   readerElements.viewer.innerHTML = `<div class="empty-state">选择论文后阅读原文件</div>`;
+  updateTranslationPanel("未选择文本", "", { hidden: true });
   showPaperListView();
   renderPapers();
   setStatus("本地资料库");
@@ -718,6 +763,8 @@ document.querySelector("#goBookmarkButton").addEventListener("click", () => {
   scrollToPage(bookmarkPage);
   setStatus(`已跳到书签：第 ${bookmarkPage} 页`);
 });
+
+document.querySelector("#translateSelectionButton").addEventListener("click", translateSelectedText);
 
 readerElements.viewer.addEventListener("scroll", updateCurrentPageFromScroll);
 

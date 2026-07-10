@@ -78,3 +78,17 @@ test("frontend reader exposes one-bookmark reading progress controls", async () 
   assert.match(script, /\/api\/papers\/\$\{state\.reader\.paperId\}\/reading-progress/);
   assert.match(script, /renderContinuousPages\(\{\s*targetPage/);
 });
+
+test("frontend reader exposes selected text translation controls", async () => {
+  const html = await readFile("public/index.html", "utf8");
+  const script = await readFile("public/app.js", "utf8");
+  const css = await readFile("public/styles.css", "utf8");
+
+  assert.match(html, /id="translateSelectionButton"/);
+  assert.match(html, /id="translationPanel"/);
+  assert.match(html, /id="translationResultText"/);
+  assert.match(script, /window\.getSelection\(\)/);
+  assert.match(script, /\/api\/translate/);
+  assert.match(script, /translateSelectedText/);
+  assert.match(css, /\.translation-panel/);
+});

@@ -25,6 +25,7 @@ import {
 } from "./pdfExtract.js";
 import { PaperRepository } from "./repository.js";
 import { classifyText } from "./taxonomy.js";
+import { translateText, TranslationError } from "./translation.js";
 
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -265,6 +266,31 @@ export function createApp(options = {}) {
     } catch (error) {
       if (error instanceof RangeError) {
         response.status(400).json({ error: error.message });
+        return;
+      }
+      next(error);
+    }
+  });
+
+  app.post("/api/translate", async (request, response, next) => {
+    try {
+      const result = await translateText(
+        {
+          text: request.body.text || "",
+          targetLanguage: request.body.targetLanguage || "zh-CN"
+        },
+        {
+          enabled: config.translationEnabled ?? process.env.QPL_TRANSLATION_ENABLED === "1",
+          apiKey: config.openaiApiKey ?? process.env.OPENAI_API_KEY,
+          model: config.translationModel ?? process.env.QPL_TRANSLATION_MODEL,
+          endpoint: config.translationEndpoint,
+          fetchImpl: config.translationFetch
+        }
+      );
+      response.json(result);
+    } catch (error) {
+      if (error instanceof TranslationError) {
+        response.status(error.status).json({ error: error.message });
         return;
       }
       next(error);

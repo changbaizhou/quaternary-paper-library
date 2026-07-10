@@ -89,3 +89,16 @@ library/
 ```
 
 `library.sqlite` 和 `library/files/` 不会提交到 Git。
+
+## 翻译
+
+PDF 阅读器支持选中文本后在线翻译。翻译默认关闭，需要启动前设置：
+
+```powershell
+$env:QPL_TRANSLATION_ENABLED="1"
+$env:OPENAI_API_KEY="你的 OpenAI API Key"
+$env:QPL_TRANSLATION_MODEL="gpt-4o-mini"
+npm start
+```
+
+系统只会把你在 PDF 中选中的文字发送给翻译接口，不会上传整篇 PDF、数据库、笔记或文件。

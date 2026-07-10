@@ -293,3 +293,137 @@ test("API saves reading progress and exposes it in paper list", async () => {
     assert.equal(papers[0].bookmarkPage, 7);
   });
 });
+
+test("API translation is disabled unless explicitly enabled", async () => {
+  await withServer(
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/translate`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "Selected paper text." })
+      });
+
+      assert.equal(response.status, 503);
+      assert.match((await response.json()).error, /翻译功能未启用/);
+    },
+    { translationEnabled: false }
+  );
+});
+
+test("API translation requires an OpenAI API key", async () => {
+  await withServer(
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/translate`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "Selected paper text." })
+      });
+
+      assert.equal(response.status, 503);
+      assert.match((await response.json()).error, /OPENAI_API_KEY/);
+    },
+    { translationEnabled: true, openaiApiKey: "" }
+  );
+});
+
+test("API translation returns provider result", async () => {
+  await withServer(
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/translate`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          text: "The loess-paleosol sequence records river integration.",
+          targetLanguage: "zh-CN"
+        })
+      });
+
+      assert.equal(response.status, 200);
+      const body = await response.json();
+      assert.equal(body.translatedText, "黄土-古土壤序列记录了河流贯通过程。");
+      assert.equal(body.provider, "openai");
+    },
+    {
+      translationEnabled: true,
+      openaiApiKey: "test-key",
+      translationModel: "test-model",
+      translationFetch: async (url, options) => {
+        assert.equal(url, "https://api.openai.com/v1/responses");
+        assert.equal(options.method, "POST");
+        assert.equal(options.headers.authorization, "Bearer test-key");
+        const payload = JSON.parse(options.body);
+        assert.equal(payload.model, "test-model");
+        assert.match(JSON.stringify(payload.input), /loess-paleosol/);
+        return new Response(JSON.stringify({ output_text: "黄土-古土壤序列记录了河流贯通过程。" }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+    }
+  );
+});
+
+test("API translation rejects empty selections", async () => {
+  await withServer(
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/translate`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "   " })
+      });
+
+      assert.equal(response.status, 400);
+      assert.match((await response.json()).error, /请先在 PDF 中选中文字/);
+    },
+    {
+      translationEnabled: true,
+      openaiApiKey: "test-key"
+    }
+  );
+});
+
+test("API translation rejects oversized selections", async () => {
+  await withServer(
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/translate`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "a".repeat(6001) })
+      });
+
+      assert.equal(response.status, 413);
+      assert.match((await response.json()).error, /选中文本过长/);
+    },
+    {
+      translationEnabled: true,
+      openaiApiKey: "test-key",
+      translationFetch: async () => {
+        throw new Error("provider should not be called");
+      }
+    }
+  );
+});
+
+test("API translation maps provider failures to a clear error", async () => {
+  await withServer(
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/translate`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "Selected paper text." })
+      });
+
+      assert.equal(response.status, 502);
+      assert.match((await response.json()).error, /翻译服务暂时不可用/);
+    },
+    {
+      translationEnabled: true,
+      openaiApiKey: "test-key",
+      translationFetch: async () =>
+        new Response(JSON.stringify({ error: "provider unavailable" }), {
+          status: 500,
+          headers: { "content-type": "application/json" }
+        })
+    }
+  );
+});

@@ -474,7 +474,7 @@ textarea {
 
 .reader-view {
   display: grid;
-  grid-template-rows: 50px auto minmax(0, 1fr);
+  grid-template-rows: 50px auto auto minmax(0, 1fr);
 }
 
 .reader-heading {
@@ -507,7 +507,8 @@ textarea {
 }
 
 .icon-button:disabled,
-.bookmark-button:disabled {
+.bookmark-button:disabled,
+.translation-button:disabled {
   cursor: not-allowed;
   opacity: 0.45;
 }
@@ -539,7 +540,8 @@ textarea {
   text-align: center;
 }
 
-.bookmark-button {
+.bookmark-button,
+.translation-button {
   height: 32px;
   min-height: 32px;
   min-width: 64px;
@@ -551,6 +553,44 @@ textarea {
 #bookmarkStatusText {
   min-width: 78px;
   text-align: left;
+}
+
+.translation-panel {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-soft);
+}
+
+.translation-panel[hidden] {
+  display: none;
+}
+
+.translation-panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.translation-panel-heading span {
+  color: var(--muted);
+}
+
+.translation-result-text {
+  max-height: 128px;
+  overflow: auto;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-raised);
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
 }
 
 .pdf-viewer {
