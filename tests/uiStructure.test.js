@@ -17,4 +17,5 @@ test("frontend loads PDF.js and opens selected papers in the reader", async () =
   assert.match(script, /pdfjs-dist\/build\/pdf\.mjs/);
   assert.match(script, /openPaperReader/);
   assert.match(script, /\/api\/papers\/\$\{paper\.id\}\/file/);
+  assert.match(script, /pdfjsLib\.getDocument\(\{\s*url: sourceUrl\s*\}\)/);
 });

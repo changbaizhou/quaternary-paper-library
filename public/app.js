@@ -332,7 +332,7 @@ async function openPaperReader(paper) {
   updateReaderControls();
 
   try {
-    state.reader.loadingTask = pdfjsLib.getDocument(sourceUrl);
+    state.reader.loadingTask = pdfjsLib.getDocument({ url: sourceUrl });
     state.reader.document = await state.reader.loadingTask.promise;
     state.reader.pageCount = state.reader.document.numPages;
     await renderCurrentPage();
