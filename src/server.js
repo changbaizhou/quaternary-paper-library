@@ -288,6 +288,10 @@ export function createApp(options = {}) {
           geminiApiKey: config.geminiApiKey ?? process.env.GEMINI_API_KEY,
           geminiModel: config.geminiModel ?? process.env.QPL_GEMINI_MODEL,
           geminiEndpoint: config.geminiEndpoint,
+          qwenApiKey: config.qwenApiKey ?? process.env.QWEN_API_KEY ?? process.env.DASHSCOPE_API_KEY,
+          qwenModel: config.qwenModel ?? process.env.QPL_QWEN_MODEL ?? process.env.QPL_TRANSLATION_MODEL,
+          qwenBaseUrl: config.qwenBaseUrl ?? process.env.QPL_QWEN_BASE_URL,
+          qwenEndpoint: config.qwenEndpoint ?? process.env.QPL_QWEN_ENDPOINT,
           fetchImpl: config.translationFetch
         }
       );

@@ -92,7 +92,20 @@ library/
 
 ## 翻译
 
-PDF 阅读器支持选中文本后在线翻译。翻译默认关闭，需要启动前设置。推荐使用 Gemini：
+PDF 阅读器支持选中文本后在线翻译。翻译默认关闭，需要启动前设置。国内网络优先推荐使用 Qwen / 阿里云百炼的 OpenAI 兼容接口：
+
+```powershell
+$env:QPL_TRANSLATION_ENABLED="1"
+$env:QPL_TRANSLATION_PROVIDER="qwen"
+$env:QWEN_API_KEY="你的 Qwen API Key"
+$env:QPL_QWEN_BASE_URL="你的 OpenAI 兼容地址，例如 https://.../compatible-mode/v1"
+$env:QPL_QWEN_MODEL="qwen-plus"
+npm start
+```
+
+`QWEN_API_KEY` 也可以换成 `DASHSCOPE_API_KEY`。如果百炼控制台给的是完整 `/chat/completions` 地址，也可以设置 `QPL_QWEN_ENDPOINT`。
+
+也可以继续使用 Gemini：
 
 ```powershell
 $env:QPL_TRANSLATION_ENABLED="1"

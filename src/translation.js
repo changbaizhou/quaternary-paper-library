@@ -44,6 +44,10 @@ Selected text:
 ${text}`;
 }
 
+function joinUrl(baseUrl, pathSuffix) {
+  return `${String(baseUrl || "").replace(/\/+$/, "")}/${String(pathSuffix || "").replace(/^\/+/, "")}`;
+}
+
 async function translateWithOpenAI({ text, targetLanguage, options, fetchImpl }) {
   const endpoint = options.endpoint || "https://api.openai.com/v1/responses";
   const model = options.model || "gpt-4o-mini";
@@ -121,6 +125,47 @@ async function translateWithGemini({ text, targetLanguage, options, fetchImpl })
   return { translatedText, provider: "gemini", model };
 }
 
+async function translateWithQwen({ text, targetLanguage, options, fetchImpl }) {
+  const baseUrl = options.qwenBaseUrl || "https://dashscope.aliyuncs.com/compatible-mode/v1";
+  const endpoint = options.qwenEndpoint || joinUrl(baseUrl, "chat/completions");
+  const model = options.qwenModel || "qwen-plus";
+  let response;
+  try {
+    response = await fetchImpl(endpoint, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${options.qwenApiKey}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are an academic translator for Quaternary geology papers. Translate the user's selected text into clear Simplified Chinese. Preserve technical terms, numbers, citations, units, and geological time names."
+          },
+          {
+            role: "user",
+            content: translationPrompt(text, targetLanguage)
+          }
+        ],
+        temperature: 0.2
+      })
+    });
+  } catch {
+    throw new TranslationError(502, "翻译服务暂时不可用");
+  }
+
+  if (!response.ok) throw new TranslationError(502, "翻译服务暂时不可用");
+
+  const payload = await response.json().catch(() => ({}));
+  const translatedText = extractResponseText(payload);
+  if (!translatedText) throw new TranslationError(502, "翻译服务暂时不可用");
+
+  return { translatedText, provider: "qwen", model };
+}
+
 export async function translateText(input = {}, options = {}) {
   const enabled = options.enabled === true;
   const provider = options.provider || "openai";
@@ -138,6 +183,11 @@ export async function translateText(input = {}, options = {}) {
   if (provider === "gemini") {
     if (!options.geminiApiKey) throw new TranslationError(503, "未配置 GEMINI_API_KEY，无法使用 Gemini 翻译");
     return translateWithGemini({ text, targetLanguage, options, fetchImpl });
+  }
+
+  if (provider === "qwen") {
+    if (!options.qwenApiKey) throw new TranslationError(503, "未配置 QWEN_API_KEY，无法使用 Qwen 翻译");
+    return translateWithQwen({ text, targetLanguage, options, fetchImpl });
   }
 
   if (!options.apiKey) throw new TranslationError(503, "未配置 OPENAI_API_KEY，无法使用在线翻译");

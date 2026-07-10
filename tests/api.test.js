@@ -342,6 +342,22 @@ test("API Gemini translation requires a Gemini API key", async () => {
   );
 });
 
+test("API Qwen translation requires a Qwen API key", async () => {
+  await withServer(
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/translate`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "Selected paper text." })
+      });
+
+      assert.equal(response.status, 503);
+      assert.match((await response.json()).error, /QWEN_API_KEY/);
+    },
+    { translationEnabled: true, translationProvider: "qwen", qwenApiKey: "" }
+  );
+});
+
 test("API translation returns provider result", async () => {
   await withServer(
     async (baseUrl) => {
@@ -416,6 +432,50 @@ test("API Gemini translation returns provider result", async () => {
                 }
               }
             ]
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          }
+        );
+      }
+    }
+  );
+});
+
+test("API Qwen translation returns provider result", async () => {
+  await withServer(
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/translate`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          text: "The loess-paleosol sequence records river integration.",
+          targetLanguage: "zh-CN"
+        })
+      });
+
+      assert.equal(response.status, 200);
+      const body = await response.json();
+      assert.equal(body.translatedText, "Qwen provider translation");
+      assert.equal(body.provider, "qwen");
+    },
+    {
+      translationEnabled: true,
+      translationProvider: "qwen",
+      qwenApiKey: "test-qwen-key",
+      qwenModel: "qwen-test-model",
+      qwenBaseUrl: "https://example.aliyuncs.com/compatible-mode/v1",
+      translationFetch: async (url, options) => {
+        assert.equal(url, "https://example.aliyuncs.com/compatible-mode/v1/chat/completions");
+        assert.equal(options.method, "POST");
+        assert.equal(options.headers.authorization, "Bearer test-qwen-key");
+        const payload = JSON.parse(options.body);
+        assert.equal(payload.model, "qwen-test-model");
+        assert.match(payload.messages[1].content, /loess-paleosol/);
+        return new Response(
+          JSON.stringify({
+            choices: [{ message: { content: "Qwen provider translation" } }]
           }),
           {
             status: 200,
