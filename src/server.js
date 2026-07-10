@@ -254,6 +254,23 @@ export function createApp(options = {}) {
     );
   });
 
+  app.patch("/api/papers/:id/reading-progress", (request, response, next) => {
+    try {
+      const paper = repo.updateReadingProgress(Number(request.params.id), request.body || {});
+      if (!paper) {
+        response.status(404).json({ error: "Paper not found" });
+        return;
+      }
+      response.json(paper);
+    } catch (error) {
+      if (error instanceof RangeError) {
+        response.status(400).json({ error: error.message });
+        return;
+      }
+      next(error);
+    }
+  });
+
   app.get("/api/papers/:id/file", (request, response, next) => {
     try {
       const paper = repo.getPaper(Number(request.params.id));

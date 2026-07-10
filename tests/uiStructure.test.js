@@ -65,3 +65,16 @@ test("paper cards and stylesheet expose polished UI primitives", async () => {
   assert.match(css, /\.paper-title/);
   assert.match(css, /\.detail-section/);
 });
+
+test("frontend reader exposes one-bookmark reading progress controls", async () => {
+  const html = await readFile("public/index.html", "utf8");
+  const script = await readFile("public/app.js", "utf8");
+
+  assert.match(html, /id="setBookmarkButton"/);
+  assert.match(html, /id="goBookmarkButton"/);
+  assert.match(html, /id="bookmarkStatusText"/);
+  assert.match(script, /bookmarkPage/);
+  assert.match(script, /lastReadPage/);
+  assert.match(script, /\/api\/papers\/\$\{state\.reader\.paperId\}\/reading-progress/);
+  assert.match(script, /renderContinuousPages\(\{\s*targetPage/);
+});

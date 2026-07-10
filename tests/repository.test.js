@@ -62,3 +62,36 @@ test("draft confirm and search workflow", async () => {
   }
 });
 
+test("repository stores one bookmark and last read page per paper", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-repo-"));
+  const dbPath = path.join(dir, "library.sqlite");
+
+  try {
+    initDb(dbPath);
+    const repo = new PaperRepository(dbPath);
+
+    const draftId = repo.createDraft({
+      originalFilename: "reader.pdf",
+      title: "Reader progress paper",
+      abstract: "A paper used to test reading progress.",
+      classification: {},
+      confidence: {},
+      evidence: {}
+    });
+    const paperId = repo.confirmDraft(draftId);
+
+    let paper = repo.updateReadingProgress(paperId, { lastReadPage: 4 });
+    assert.equal(paper.lastReadPage, 4);
+    assert.equal(paper.bookmarkPage, null);
+
+    paper = repo.updateReadingProgress(paperId, { bookmarkPage: 8 });
+    assert.equal(paper.lastReadPage, 4);
+    assert.equal(paper.bookmarkPage, 8);
+
+    paper = repo.updateReadingProgress(paperId, { bookmarkPage: 3 });
+    assert.equal(paper.bookmarkPage, 3);
+    assert.equal(repo.getPaper(paperId).bookmarkPage, 3);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -245,3 +245,51 @@ test("API returns 404 when a confirmed paper has no source file", async () => {
     assert.equal(fileResponse.status, 404);
   });
 });
+
+test("API saves reading progress and exposes it in paper list", async () => {
+  await withServer(async (baseUrl) => {
+    const createResponse = await fetch(`${baseUrl}/api/drafts/from-text`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        filename: "reader.pdf",
+        text: "Reader progress paper\nAbstract\nThis record tests reader bookmarks."
+      })
+    });
+    assert.equal(createResponse.status, 201);
+    const draft = await createResponse.json();
+
+    const confirmResponse = await fetch(`${baseUrl}/api/drafts/${draft.id}/confirm`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: draft.title })
+    });
+    assert.equal(confirmResponse.status, 201);
+    const paper = await confirmResponse.json();
+
+    const lastReadResponse = await fetch(`${baseUrl}/api/papers/${paper.id}/reading-progress`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ lastReadPage: 4 })
+    });
+    assert.equal(lastReadResponse.status, 200);
+    let updated = await lastReadResponse.json();
+    assert.equal(updated.lastReadPage, 4);
+    assert.equal(updated.bookmarkPage, null);
+
+    const bookmarkResponse = await fetch(`${baseUrl}/api/papers/${paper.id}/reading-progress`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ bookmarkPage: 7 })
+    });
+    assert.equal(bookmarkResponse.status, 200);
+    updated = await bookmarkResponse.json();
+    assert.equal(updated.lastReadPage, 4);
+    assert.equal(updated.bookmarkPage, 7);
+
+    const listResponse = await fetch(`${baseUrl}/api/papers`);
+    const papers = await listResponse.json();
+    assert.equal(papers[0].lastReadPage, 4);
+    assert.equal(papers[0].bookmarkPage, 7);
+  });
+});

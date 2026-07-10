@@ -474,7 +474,7 @@ textarea {
 
 .reader-view {
   display: grid;
-  grid-template-rows: 50px 44px minmax(0, 1fr);
+  grid-template-rows: 50px auto minmax(0, 1fr);
 }
 
 .reader-heading {
@@ -506,7 +506,8 @@ textarea {
   font-size: 18px;
 }
 
-.icon-button:disabled {
+.icon-button:disabled,
+.bookmark-button:disabled {
   cursor: not-allowed;
   opacity: 0.45;
 }
@@ -516,8 +517,8 @@ textarea {
 }
 
 .pdf-toolbar {
-  display: grid;
-  grid-template-columns: 34px 64px 46px 34px 34px 54px 34px;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 7px;
   padding: 6px 10px;
@@ -526,6 +527,7 @@ textarea {
 }
 
 .pdf-toolbar input {
+  width: 64px;
   height: 32px;
   padding: 5px 6px;
   text-align: center;
@@ -535,6 +537,20 @@ textarea {
   color: var(--muted);
   font-size: 12px;
   text-align: center;
+}
+
+.bookmark-button {
+  height: 32px;
+  min-height: 32px;
+  min-width: 64px;
+  padding: 0 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+#bookmarkStatusText {
+  min-width: 78px;
+  text-align: left;
 }
 
 .pdf-viewer {

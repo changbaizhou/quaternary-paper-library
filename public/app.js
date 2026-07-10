@@ -19,6 +19,8 @@ const state = {
     pageNumber: 1,
     pageCount: 0,
     scale: 1,
+    bookmarkPage: null,
+    lastReadPage: null,
     renderToken: 0,
     sourceUrl: "",
     observer: null,
@@ -65,7 +67,10 @@ const readerElements = {
   pageCountText: document.querySelector("#pageCountText"),
   zoomText: document.querySelector("#zoomText"),
   previousButton: document.querySelector("#previousPageButton"),
-  nextButton: document.querySelector("#nextPageButton")
+  nextButton: document.querySelector("#nextPageButton"),
+  setBookmarkButton: document.querySelector("#setBookmarkButton"),
+  goBookmarkButton: document.querySelector("#goBookmarkButton"),
+  bookmarkStatusText: document.querySelector("#bookmarkStatusText")
 };
 
 function splitList(value) {
@@ -81,6 +86,17 @@ function joinList(value) {
 
 function setStatus(text) {
   document.querySelector("#statusText").textContent = text;
+}
+
+function normalizeReaderPage(value) {
+  const page = Number(value);
+  return Number.isInteger(page) && page > 0 ? page : null;
+}
+
+function patchPaperInState(updatedPaper) {
+  if (!updatedPaper?.id) return;
+  state.papers = state.papers.map((paper) => (paper.id === updatedPaper.id ? updatedPaper : paper));
+  if (state.selectedPaper?.id === updatedPaper.id) state.selectedPaper = updatedPaper;
 }
 
 async function api(path, options = {}) {
@@ -239,6 +255,14 @@ function showReaderView() {
   readerElements.readerView.hidden = false;
 }
 
+function updateBookmarkControls() {
+  const hasDocument = Boolean(state.reader.document);
+  const bookmarkPage = normalizeReaderPage(state.reader.bookmarkPage);
+  readerElements.setBookmarkButton.disabled = !hasDocument;
+  readerElements.goBookmarkButton.disabled = !hasDocument || !bookmarkPage;
+  readerElements.bookmarkStatusText.textContent = bookmarkPage ? `书签 第 ${bookmarkPage} 页` : "未设书签";
+}
+
 function updateReaderControls() {
   const { pageNumber, pageCount, scale } = state.reader;
   readerElements.pageNumberInput.value = String(pageNumber || 1);
@@ -247,6 +271,34 @@ function updateReaderControls() {
   readerElements.zoomText.textContent = `${Math.round(scale * 100)}%`;
   readerElements.previousButton.disabled = pageNumber <= 1;
   readerElements.nextButton.disabled = pageNumber >= pageCount;
+  updateBookmarkControls();
+}
+
+async function saveReadingProgress(progress, { reportErrors = false } = {}) {
+  if (!state.reader.paperId) return null;
+  try {
+    const updatedPaper = await api(`/api/papers/${state.reader.paperId}/reading-progress`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(progress)
+    });
+    patchPaperInState(updatedPaper);
+    state.reader.bookmarkPage = normalizeReaderPage(updatedPaper.bookmarkPage);
+    state.reader.lastReadPage = normalizeReaderPage(updatedPaper.lastReadPage);
+    updateReaderControls();
+    return updatedPaper;
+  } catch (error) {
+    if (reportErrors) setStatus(error.message);
+    return null;
+  }
+}
+
+function recordLastReadPage(pageNumber) {
+  const page = normalizeReaderPage(pageNumber);
+  if (!page || !state.reader.paperId || page === state.reader.lastReadPage) return;
+  state.reader.lastReadPage = page;
+  updateBookmarkControls();
+  void saveReadingProgress({ lastReadPage: page });
 }
 
 function resetRenderedPages() {
@@ -271,6 +323,8 @@ async function closeReaderDocument() {
   state.reader.pageNumber = 1;
   state.reader.pageCount = 0;
   state.reader.sourceUrl = "";
+  state.reader.bookmarkPage = null;
+  state.reader.lastReadPage = null;
 }
 
 function renderTextLayer(pageElement, textContent, viewport) {
@@ -404,6 +458,7 @@ function updateCurrentPageFromScroll() {
   if (bestPage !== state.reader.pageNumber) {
     state.reader.pageNumber = bestPage;
     updateReaderControls();
+    recordLastReadPage(bestPage);
   }
 }
 
@@ -440,15 +495,16 @@ function scrollToPage(pageNumber, behavior = "smooth") {
 
   state.reader.pageNumber = nextPage;
   updateReaderControls();
+  recordLastReadPage(nextPage);
   renderPageShell(nextPage);
   shell.scrollIntoView({ block: "start", behavior });
 }
 
-async function renderContinuousPages({ preservePage = false } = {}) {
+async function renderContinuousPages({ preservePage = false, targetPage = null } = {}) {
   const pdfDocument = state.reader.document;
   if (!pdfDocument) return;
 
-  const targetPage = preservePage ? state.reader.pageNumber : 1;
+  const requestedPage = targetPage ?? (preservePage ? state.reader.pageNumber : 1);
   const token = state.reader.renderToken + 1;
   state.reader.renderToken = token;
   resetRenderedPages();
@@ -465,7 +521,7 @@ async function renderContinuousPages({ preservePage = false } = {}) {
   }
 
   observeReaderPages(token);
-  state.reader.pageNumber = Math.min(Math.max(targetPage, 1), state.reader.pageCount || 1);
+  state.reader.pageNumber = Math.min(Math.max(requestedPage, 1), state.reader.pageCount || 1);
   updateReaderControls();
   requestAnimationFrame(() => scrollToPage(state.reader.pageNumber, "auto"));
 }
@@ -476,10 +532,15 @@ async function openPaperReader(paper) {
   renderPapers();
 
   const sourceUrl = `/api/papers/${paper.id}/file`;
+  const bookmarkPage = normalizeReaderPage(paper.bookmarkPage);
+  const lastReadPage = normalizeReaderPage(paper.lastReadPage);
+  const resumePage = bookmarkPage || lastReadPage || 1;
   state.reader.paperId = paper.id;
-  state.reader.pageNumber = 1;
+  state.reader.pageNumber = resumePage;
   state.reader.pageCount = 0;
   state.reader.scale = 1;
+  state.reader.bookmarkPage = bookmarkPage;
+  state.reader.lastReadPage = lastReadPage;
   state.reader.sourceUrl = sourceUrl;
   readerElements.title.textContent = paper.title || "原文阅读";
   readerElements.meta.textContent = [(paper.authors || []).join(", "), paper.year, paper.journal]
@@ -493,8 +554,14 @@ async function openPaperReader(paper) {
     state.reader.loadingTask = pdfjsLib.getDocument({ url: sourceUrl });
     state.reader.document = await state.reader.loadingTask.promise;
     state.reader.pageCount = state.reader.document.numPages;
-    await renderContinuousPages();
-    setStatus("原文已打开");
+    await renderContinuousPages({ targetPage: resumePage });
+    setStatus(
+      bookmarkPage
+        ? `已跳到书签：第 ${Math.min(bookmarkPage, state.reader.pageCount)} 页`
+        : lastReadPage
+          ? `已回到上次阅读：第 ${Math.min(lastReadPage, state.reader.pageCount)} 页`
+          : "原文已打开"
+    );
   } catch (error) {
     state.reader.pageCount = 0;
     readerElements.viewer.innerHTML = `<div class="empty-state">没有找到原文件或无法读取 PDF</div>`;
@@ -631,6 +698,25 @@ document.querySelector("#zoomInButton").addEventListener("click", async () => {
   if (!state.reader.document) return;
   state.reader.scale = Math.min(MAX_READER_SCALE, Number((state.reader.scale + 0.15).toFixed(2)));
   await renderContinuousPages({ preservePage: true });
+});
+
+document.querySelector("#setBookmarkButton").addEventListener("click", async () => {
+  if (!state.reader.document) return;
+  const page = state.reader.pageNumber || 1;
+  setStatus("正在保存书签");
+  const updatedPaper = await saveReadingProgress({ bookmarkPage: page, lastReadPage: page }, { reportErrors: true });
+  if (!updatedPaper) return;
+  setStatus(`书签已保存：第 ${state.reader.bookmarkPage} 页`);
+});
+
+document.querySelector("#goBookmarkButton").addEventListener("click", () => {
+  const bookmarkPage = normalizeReaderPage(state.reader.bookmarkPage);
+  if (!bookmarkPage) {
+    setStatus("这篇论文还没有书签");
+    return;
+  }
+  scrollToPage(bookmarkPage);
+  setStatus(`已跳到书签：第 ${bookmarkPage} 页`);
 });
 
 readerElements.viewer.addEventListener("scroll", updateCurrentPageFromScroll);

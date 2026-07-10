@@ -7,6 +7,12 @@ export function openDb(dbPath) {
   return new DatabaseSync(dbPath);
 }
 
+function ensureColumn(db, tableName, columnName, definition) {
+  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all();
+  if (columns.some((column) => column.name === columnName)) return;
+  db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
+}
+
 export function initDb(dbPath) {
   const db = openDb(dbPath);
   db.exec(`
@@ -58,11 +64,14 @@ export function initDb(dbPath) {
       notes_limits TEXT NOT NULL DEFAULT '',
       notes_quote_points TEXT NOT NULL DEFAULT '',
       notes_personal TEXT NOT NULL DEFAULT '',
+      bookmark_page INTEGER,
+      last_read_page INTEGER,
       search_text TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
   `);
+  ensureColumn(db, "papers", "bookmark_page", "INTEGER");
+  ensureColumn(db, "papers", "last_read_page", "INTEGER");
   db.close();
 }
-

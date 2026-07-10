@@ -85,9 +85,20 @@ function mapPaper(row) {
     notesLimits: row.notes_limits,
     notesQuotePoints: row.notes_quote_points,
     notesPersonal: row.notes_personal,
+    bookmarkPage: row.bookmark_page,
+    lastReadPage: row.last_read_page,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
+}
+
+function normalizePageNumber(value) {
+  if (value === null) return null;
+  const page = Number(value);
+  if (!Number.isInteger(page) || page < 1) {
+    throw new RangeError("Page number must be a positive integer");
+  }
+  return page;
 }
 
 function mergeUnique(...lists) {
@@ -271,6 +282,32 @@ export class PaperRepository {
     return this.withDb((db) => mapPaper(db.prepare("SELECT * FROM papers WHERE id = ?").get(id)));
   }
 
+  updateReadingProgress(id, progress = {}) {
+    return this.withDb((db) => {
+      const existing = db.prepare("SELECT id FROM papers WHERE id = ?").get(id);
+      if (!existing) return null;
+
+      const assignments = [];
+      const values = [];
+      if (Object.hasOwn(progress, "lastReadPage")) {
+        assignments.push("last_read_page = ?");
+        values.push(normalizePageNumber(progress.lastReadPage));
+      }
+      if (Object.hasOwn(progress, "bookmarkPage")) {
+        assignments.push("bookmark_page = ?");
+        values.push(normalizePageNumber(progress.bookmarkPage));
+      }
+
+      if (assignments.length > 0) {
+        db.prepare(
+          `UPDATE papers SET ${assignments.join(", ")}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+        ).run(...values, id);
+      }
+
+      return mapPaper(db.prepare("SELECT * FROM papers WHERE id = ?").get(id));
+    });
+  }
+
   searchPapers({ query = "", filters = {} } = {}) {
     return this.withDb((db) => {
       const rows = db.prepare("SELECT * FROM papers ORDER BY updated_at DESC, id DESC").all();
@@ -294,4 +331,3 @@ export class PaperRepository {
     });
   }
 }
-
