@@ -5,3 +5,4 @@ library/files/
 server.out.log
 server.err.log
 .env
+local.env.bat

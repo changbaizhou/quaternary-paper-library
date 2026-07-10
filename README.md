@@ -17,6 +17,16 @@
 
 ## 运行
 
+Windows 可以直接双击：
+
+```text
+启动论文库.bat
+```
+
+第一次启用翻译前，先复制 `local.env.example.bat` 为 `local.env.bat`，把自己的 Qwen API Key 和百炼 OpenAI 兼容地址填进去。`local.env.bat` 只保存在本机，不会提交到 GitHub。
+
+也可以手动启动：
+
 ```bash
 npm install
 npm start
