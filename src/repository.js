@@ -1,5 +1,5 @@
 import { openDb } from "./database.js";
-import { metadataFields, noteFields } from "./paperData.js";
+import { mergePaperData, metadataFields, noteFields } from "./paperData.js";
 import { normalizeDoi, normalizeTitle, titleBigrams, titleSimilarity } from "./duplicates.js";
 
 const draftJsonFields = {
@@ -48,6 +48,7 @@ const paperColumns = {
 };
 
 const editableFields = [...metadataFields, ...noteFields];
+const arrayPaperFields = new Set(["authors", "keywords", "themes", "regions", "periods", "materials", "methods", "proxies"]);
 
 function toJson(value, fallback) {
   return JSON.stringify(value ?? fallback);
@@ -184,6 +185,67 @@ function normalizePageNumber(value) {
 
 function mergeUnique(...lists) {
   return [...new Set(lists.flat().filter(Boolean))];
+}
+
+function mergeDecisionSummary(target, source, merged) {
+  const fields = [...metadataFields, ...noteFields, "bookmarkPage", "lastReadPage"];
+  const decisions = {};
+  for (const field of fields) {
+    const targetValue = target[field];
+    const sourceValue = source[field];
+    const result = merged[field];
+    const serialize = (value) => JSON.stringify(value ?? null);
+    decisions[field] = {
+      decision: serialize(result) === serialize(targetValue)
+        ? "target"
+        : serialize(result) === serialize(sourceValue) ? "source" : "merged",
+      target: targetValue ?? null,
+      source: sourceValue ?? null,
+      result: result ?? null
+    };
+  }
+  return decisions;
+}
+
+function numericId(value, label) {
+  const id = Number(value);
+  if (!Number.isSafeInteger(id) || id < 1) throw new TypeError(`${label} must be a positive integer`);
+  return id;
+}
+
+function requireBackupRecord(db, backupRecordId) {
+  const id = numericId(
+    backupRecordId && typeof backupRecordId === "object" ? backupRecordId.backupRecordId : backupRecordId,
+    "backupRecordId"
+  );
+  if (!db.prepare("SELECT 1 FROM backup_records WHERE id = ?").get(id)) {
+    throw new PaperStateError("A pre-merge backup record is required");
+  }
+  return id;
+}
+
+function updateMergedPaper(db, target, merged) {
+  const assignments = [];
+  const values = [];
+  for (const field of editableFields) {
+    assignments.push(`${paperColumns[field]} = ?`);
+    values.push(Object.hasOwn(paperJsonFields, field) ? toJson(merged[field], []) : merged[field]);
+  }
+  assignments.push(
+    "stored_filename = ?", "stored_path = ?", "file_sha256 = ?",
+    "bookmark_page = ?", "last_read_page = ?",
+    "normalized_doi = ?", "normalized_title = ?", "search_text = ?"
+  );
+  values.push(
+    merged.storedFilename || "", merged.storedPath || "", merged.fileSha256 || "",
+    merged.bookmarkPage, merged.lastReadPage,
+    normalizeDoi(merged.doi), normalizeTitle(merged.title), makeSearchText(merged)
+  );
+  db.prepare(`
+    UPDATE papers
+    SET ${assignments.join(", ")}, version = version + 1, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(...values, target.id);
 }
 
 const duplicateReasonOrder = ["sha256", "doi", "title"];
@@ -798,6 +860,121 @@ export class PaperRepository {
         db.prepare("UPDATE drafts SET status = 'confirmed' WHERE id = ?").run(id);
         db.exec("COMMIT");
         return Number(result.lastInsertRowid);
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    });
+  }
+
+  mergePapers(targetPaperId, sourcePaperId, backupRecordId) {
+    return this.withDb((db) => {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const targetId = numericId(targetPaperId, "targetPaperId");
+        const sourceId = numericId(sourcePaperId, "sourcePaperId");
+        if (targetId === sourceId) throw new TypeError("A paper cannot be merged into itself");
+        const targetRow = db.prepare("SELECT * FROM papers WHERE id = ?").get(targetId);
+        const sourceRow = db.prepare("SELECT * FROM papers WHERE id = ?").get(sourceId);
+        if (!targetRow || !sourceRow) throw new PaperNotFoundError();
+        if (
+          targetRow.deleted_at !== null || targetRow.merged_into_id !== null
+          || sourceRow.deleted_at !== null || sourceRow.merged_into_id !== null
+        ) {
+          throw new PaperStateError("Both papers must be active before merging");
+        }
+
+        const backupId = requireBackupRecord(db, backupRecordId);
+        const target = mapPaper(targetRow);
+        const source = mapPaper(sourceRow);
+        const merged = mergePaperData(target, source);
+        updateMergedPaper(db, target, merged);
+        db.prepare("UPDATE paper_files SET paper_id = ?, draft_id = NULL WHERE paper_id = ?").run(targetId, sourceId);
+        db.prepare(`
+          UPDATE papers
+          SET deleted_at = CURRENT_TIMESTAMP, merged_into_id = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `).run(targetId, sourceId);
+        db.prepare(`
+          INSERT INTO paper_merge_log (target_paper_id, source_paper_id, backup_record_id, summary_json)
+          VALUES (?, ?, ?, ?)
+        `).run(targetId, sourceId, backupId, JSON.stringify({ type: "paper", fields: mergeDecisionSummary(target, source, merged) }));
+
+        const result = mapPaper(db.prepare("SELECT * FROM papers WHERE id = ?").get(targetId));
+        db.exec("COMMIT");
+        return result;
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    });
+  }
+
+  mergeDraft(draftId, targetPaperId, backupRecordId) {
+    return this.withDb((db) => {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const sourceDraftId = numericId(draftId, "draftId");
+        const targetId = numericId(targetPaperId, "targetPaperId");
+        const draftRow = db.prepare("SELECT * FROM drafts WHERE id = ?").get(sourceDraftId);
+        if (!draftRow) throw new DraftNotFoundError();
+        if (draftRow.status !== "pending") throw new PaperStateError("Only pending drafts can be merged");
+        const targetRow = db.prepare("SELECT * FROM papers WHERE id = ?").get(targetId);
+        if (!targetRow) throw new PaperNotFoundError();
+        if (targetRow.deleted_at !== null || targetRow.merged_into_id !== null) {
+          throw new PaperStateError("Target paper must be active before merging");
+        }
+
+        const backupId = requireBackupRecord(db, backupRecordId);
+        const target = mapPaper(targetRow);
+        const draft = mapDraft(draftRow);
+        const source = {
+          storedFilename: draft.storedFilename,
+          storedPath: draft.storedPath,
+          fileSha256: draft.fileSha256,
+          doi: draft.doi,
+          title: draft.title,
+          authors: draft.authors,
+          journal: draft.journal,
+          year: draft.year,
+          abstract: draft.abstract,
+          keywords: mergeUnique(draft.authorKeywords, draft.suggestedKeywords),
+          themes: draft.classification.themes || [],
+          regions: draft.classification.regions || [],
+          periods: draft.classification.periods || [],
+          materials: draft.classification.materials || [],
+          methods: draft.classification.methods || [],
+          proxies: draft.classification.proxies || [],
+          readingStatus: "to-read",
+          ...Object.fromEntries(noteFields.filter((field) => field !== "readingStatus").map((field) => [field, ""])),
+          bookmarkPage: null,
+          lastReadPage: null
+        };
+        const merged = mergePaperData(target, source);
+        for (const field of arrayPaperFields) {
+          if (Array.isArray(target[field]) && target[field].length > 0) merged[field] = target[field];
+        }
+        updateMergedPaper(db, target, merged);
+
+        const draftFiles = db.prepare("SELECT id FROM paper_files WHERE draft_id = ? ORDER BY id ASC").all(sourceDraftId);
+        if (draftFiles.length > 0) {
+          const moveFile = db.prepare("UPDATE paper_files SET paper_id = ?, draft_id = NULL, status = 'active' WHERE id = ?");
+          for (const draftFile of draftFiles) moveFile.run(targetId, draftFile.id);
+        } else if (draft.storedPath) {
+          db.prepare(`
+            INSERT INTO paper_files (paper_id, stored_filename, stored_path, sha256)
+            VALUES (?, ?, ?, ?)
+          `).run(targetId, draft.storedFilename, draft.storedPath, draft.fileSha256);
+        }
+        db.prepare("UPDATE drafts SET status = 'merged' WHERE id = ? AND status = 'pending'").run(sourceDraftId);
+        db.prepare(`
+          INSERT INTO paper_merge_log (target_paper_id, source_paper_id, backup_record_id, summary_json)
+          VALUES (?, ?, ?, ?)
+        `).run(targetId, sourceDraftId, backupId, JSON.stringify({ type: "draft", fields: mergeDecisionSummary(target, source, merged) }));
+
+        const result = mapPaper(db.prepare("SELECT * FROM papers WHERE id = ?").get(targetId));
+        db.exec("COMMIT");
+        return result;
       } catch (error) {
         if (db.isTransaction) db.exec("ROLLBACK");
         throw error;

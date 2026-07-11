@@ -596,6 +596,118 @@ test("repository confirms a missing draft with DraftNotFoundError", async () => 
   }
 });
 
+test("repository merges complementary paper data, files, and traceability in one operation", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-paper-merge-"));
+  const dbPath = path.join(dir, "library.sqlite");
+
+  try {
+    initDb(dbPath);
+    const repo = new PaperRepository(dbPath);
+    const createPaper = (input) => repo.confirmDraft(repo.createDraft({
+      classification: {},
+      confidence: {},
+      evidence: {},
+      ...input
+    }), input);
+    const targetId = createPaper({
+      storedFilename: "target.pdf",
+      storedPath: "2026/target.pdf",
+      title: "Target title",
+      authors: ["Alice"],
+      keywords: ["Climate", "climate"],
+      abstract: "",
+      readingStatus: "to-read",
+      notesCoreFindings: "Target note"
+    });
+    const sourceId = createPaper({
+      storedFilename: "source.pdf",
+      storedPath: "2026/source.pdf",
+      title: "Source title",
+      authors: ["alice", "Bob"],
+      keywords: ["CLIMATE", "Proxy"],
+      abstract: "Source abstract",
+      readingStatus: "must-read",
+      notesCoreFindings: "Source note"
+    });
+    repo.updateReadingProgress(targetId, { lastReadPage: 4 });
+    repo.updateReadingProgress(sourceId, { lastReadPage: 9, bookmarkPage: 12 });
+    const backup = repo.createBackupRecord({
+      backupType: "database",
+      storedPath: path.join(dir, "backup"),
+      createdAt: new Date().toISOString()
+    });
+
+    const merged = repo.mergePapers(targetId, sourceId, backup.id);
+
+    assert.equal(merged.title, "Target title");
+    assert.equal(merged.abstract, "Source abstract");
+    assert.deepEqual(merged.authors, ["Alice", "Bob"]);
+    assert.deepEqual(merged.keywords, ["Climate", "Proxy"]);
+    assert.equal(merged.readingStatus, "must-read");
+    assert.equal(merged.notesCoreFindings, "Target note\n\n--- 合并自另一篇论文记录 ---\n\nSource note");
+    assert.equal(merged.lastReadPage, 9);
+    assert.equal(merged.bookmarkPage, 12);
+
+    const db = openDb(dbPath);
+    try {
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM paper_files WHERE paper_id = ?").get(targetId).count, 2);
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM paper_files WHERE paper_id = ?").get(sourceId).count, 0);
+      const source = db.prepare("SELECT deleted_at, merged_into_id FROM papers WHERE id = ?").get(sourceId);
+      assert.equal(source.merged_into_id, targetId);
+      assert.ok(source.deleted_at);
+      const log = db.prepare("SELECT backup_record_id, summary_json FROM paper_merge_log WHERE target_paper_id = ?").get(targetId);
+      assert.equal(log.backup_record_id, backup.id);
+      assert.match(log.summary_json, /abstract/);
+    } finally {
+      db.close();
+    }
+    assert.equal(repo.searchPapers().some((paper) => paper.id === sourceId), false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("repository merges a pending duplicate draft into an active paper without creating a paper", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-draft-merge-"));
+  const dbPath = path.join(dir, "library.sqlite");
+
+  try {
+    initDb(dbPath);
+    const repo = new PaperRepository(dbPath);
+    const targetId = repo.confirmDraft(repo.createDraft({ title: "Existing target", abstract: "", classification: { regions: ["North"] }, confidence: {}, evidence: {} }));
+    const draftId = repo.createDraft({
+      storedFilename: "duplicate.pdf",
+      storedPath: "2026/duplicate.pdf",
+      title: "Draft title",
+      abstract: "Draft abstract",
+      authors: ["Draft author"],
+      authorKeywords: ["Climate"],
+      classification: { regions: ["north", "South"] },
+      confidence: {},
+      evidence: {}
+    });
+    const backup = repo.createBackupRecord({ backupType: "database", storedPath: path.join(dir, "backup") });
+
+    const merged = repo.mergeDraft(draftId, targetId, backup.id);
+
+    assert.equal(merged.id, targetId);
+    assert.equal(merged.title, "Existing target");
+    assert.equal(merged.abstract, "Draft abstract");
+    assert.deepEqual(merged.regions, ["North"]);
+    assert.equal(repo.searchPapers().length, 1);
+    assert.equal(repo.getDraft(draftId).status, "merged");
+    const db = openDb(dbPath);
+    try {
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM paper_files WHERE paper_id = ? AND stored_filename = ?").get(targetId, "duplicate.pdf").count, 1);
+      assert.equal(db.prepare("SELECT backup_record_id FROM paper_merge_log WHERE source_paper_id = ?").get(draftId).backup_record_id, backup.id);
+    } finally {
+      db.close();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("repository groups matching active secondary file hashes once", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-hash-groups-"));
   const dbPath = path.join(dir, "library.sqlite");

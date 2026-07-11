@@ -604,6 +604,68 @@ export function createApp(options = {}) {
     }
   });
 
+  app.post("/api/papers/:id/merge", (request, response, next) => {
+    try {
+      if (request.body?.confirm !== true) {
+        response.status(400).json({ error: "Merge confirmation is required" });
+        return;
+      }
+      const targetId = Number(request.params.id);
+      const sourceId = Number(request.body?.sourcePaperId);
+      if (!Number.isSafeInteger(targetId) || targetId < 1 || !Number.isSafeInteger(sourceId) || sourceId < 1) {
+        response.status(404).json({ error: "Paper not found" });
+        return;
+      }
+      if (targetId === sourceId) {
+        response.status(400).json({ error: "A paper cannot be merged into itself" });
+        return;
+      }
+      const target = repo.getPaper(targetId);
+      const source = repo.getPaper(sourceId);
+      if (!target || !source) {
+        response.status(404).json({ error: "Paper not found" });
+        return;
+      }
+      if (target.deletedAt !== null || target.mergedIntoId !== null || source.deletedAt !== null || source.mergedIntoId !== null) {
+        response.status(409).json({ error: "Both papers must be active before merging" });
+        return;
+      }
+      const backup = createAndRecordBackup(repo, config, "database", "paper-merge", now);
+      response.json(publicPaper(repo.mergePapers(targetId, sourceId, backup.id)));
+    } catch (error) {
+      respondToPaperStateError(error, response, next);
+    }
+  });
+
+  app.post("/api/drafts/:id/merge", (request, response, next) => {
+    try {
+      if (request.body?.confirm !== true) {
+        response.status(400).json({ error: "Merge confirmation is required" });
+        return;
+      }
+      const draftId = Number(request.params.id);
+      const targetId = Number(request.body?.targetPaperId);
+      if (!Number.isSafeInteger(draftId) || draftId < 1 || !Number.isSafeInteger(targetId) || targetId < 1) {
+        response.status(404).json({ error: "Draft or target paper not found" });
+        return;
+      }
+      const draft = repo.getDraft(draftId);
+      const target = repo.getPaper(targetId);
+      if (!draft || !target) {
+        response.status(404).json({ error: "Draft or target paper not found" });
+        return;
+      }
+      if (draft.status !== "pending" || target.deletedAt !== null || target.mergedIntoId !== null) {
+        response.status(409).json({ error: "Draft must be pending and target paper must be active" });
+        return;
+      }
+      const backup = createAndRecordBackup(repo, config, "database", "draft-merge", now);
+      response.json(publicPaper(repo.mergeDraft(draftId, targetId, backup.id)));
+    } catch (error) {
+      respondToPaperStateError(error, response, next);
+    }
+  });
+
   app.get("/api/papers", (request, response) => {
     response.json(repo.searchPapers({
         query: request.query.query || "",

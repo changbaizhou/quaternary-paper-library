@@ -226,6 +226,111 @@ test("API returns 404 for confirming a missing draft", async () => {
   });
 });
 
+test("API paper merge requires confirmation and creates a backup before success", async () => {
+  await withServer(async (baseUrl, { dbPath }) => {
+    const repo = new PaperRepository(dbPath);
+    const createPaper = (title) => repo.confirmDraft(repo.createDraft({ title, classification: {}, confidence: {}, evidence: {} }));
+    const targetId = createPaper("API target");
+    const sourceId = createPaper("API source");
+
+    const missingConfirmation = await fetch(`${baseUrl}/api/papers/${targetId}/merge`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sourcePaperId: sourceId })
+    });
+    assert.equal(missingConfirmation.status, 400);
+
+    const merged = await fetch(`${baseUrl}/api/papers/${targetId}/merge`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sourcePaperId: sourceId, confirm: true })
+    });
+    assert.equal(merged.status, 200);
+    assert.equal((await merged.json()).id, targetId);
+    assert.equal(repo.searchPapers().length, 1);
+    const backups = repo.listBackupRecords();
+    assert.equal(backups.length, 1);
+    const db = openDb(dbPath);
+    try {
+      const log = db.prepare("SELECT backup_record_id FROM paper_merge_log WHERE target_paper_id = ?").get(targetId);
+      assert.equal(log.backup_record_id, backups[0].id);
+    } finally {
+      db.close();
+    }
+    const backupDb = openDb(path.join(backups[0].storedPath, "library.sqlite"));
+    try {
+      assert.equal(backupDb.prepare("SELECT COUNT(*) AS count FROM paper_merge_log").get().count, 0);
+      assert.equal(backupDb.prepare("SELECT deleted_at FROM papers WHERE id = ?").get(sourceId).deleted_at, null);
+    } finally {
+      backupDb.close();
+    }
+  });
+});
+
+test("API merge returns 400, 404, and 409 for invalid paper merge states", async () => {
+  await withServer(async (baseUrl, { dbPath }) => {
+    const repo = new PaperRepository(dbPath);
+    const createPaper = (title) => repo.confirmDraft(repo.createDraft({ title, classification: {}, confidence: {}, evidence: {} }));
+    const targetId = createPaper("Error target");
+    const sourceId = createPaper("Error source");
+
+    const same = await fetch(`${baseUrl}/api/papers/${targetId}/merge`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sourcePaperId: targetId, confirm: true })
+    });
+    assert.equal(same.status, 400);
+
+    const missing = await fetch(`${baseUrl}/api/papers/${targetId}/merge`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sourcePaperId: 999999, confirm: true })
+    });
+    assert.equal(missing.status, 404);
+
+    repo.trashPaper(sourceId);
+    const trashed = await fetch(`${baseUrl}/api/papers/${targetId}/merge`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sourcePaperId: sourceId, confirm: true })
+    });
+    assert.equal(trashed.status, 409);
+  });
+});
+
+test("API draft merge validates pending and active states and does not create a second paper", async () => {
+  await withServer(async (baseUrl, { dbPath }) => {
+    const repo = new PaperRepository(dbPath);
+    const targetId = repo.confirmDraft(repo.createDraft({ title: "Draft merge target", classification: {}, confidence: {}, evidence: {} }));
+    const draftId = repo.createDraft({ title: "Duplicate draft", storedPath: "2026/duplicate.pdf", classification: {}, confidence: {}, evidence: {} });
+
+    const missingConfirmation = await fetch(`${baseUrl}/api/drafts/${draftId}/merge`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ targetPaperId: targetId })
+    });
+    assert.equal(missingConfirmation.status, 400);
+
+    const merged = await fetch(`${baseUrl}/api/drafts/${draftId}/merge`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ targetPaperId: targetId, confirm: true })
+    });
+    assert.equal(merged.status, 200);
+    assert.equal((await merged.json()).id, targetId);
+    assert.equal(repo.searchPapers().length, 1);
+    assert.equal(repo.getDraft(draftId).status, "merged");
+    assert.equal(repo.listBackupRecords().length, 1);
+
+    const repeated = await fetch(`${baseUrl}/api/drafts/${draftId}/merge`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ targetPaperId: targetId, confirm: true })
+    });
+    assert.equal(repeated.status, 409);
+  });
+});
+
 test("API stores same-name same-millisecond uploads separately with correct hashes", async () => {
   await withServer(
     async (baseUrl, { dbPath, filesDir }) => {
