@@ -473,11 +473,15 @@ textarea {
 
 .paper-save-status {
   min-width: 0;
-  min-height: 34px;
-  display: flex;
-  align-items: center;
+  height: 34px;
+  display: -webkit-box;
+  overflow: hidden;
   color: var(--muted);
   font-size: 12px;
+  line-height: 17px;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .paper-save-status.is-neutral {

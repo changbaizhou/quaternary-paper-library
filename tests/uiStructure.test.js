@@ -114,3 +114,12 @@ test("paper detail exposes metadata save and notes autosave wiring", async () =>
   assert.match(script, /expectedVersion/);
   assert.match(script, /NOTE_AUTOSAVE_DELAY_MS/);
 });
+
+test("paper save status has a stable bounded text block", async () => {
+  const css = await readFile("public/styles.css", "utf8");
+
+  assert.match(css, /\.paper-save-status\s*\{[\s\S]*height:\s*34px;/);
+  assert.match(css, /\.paper-save-status\s*\{[\s\S]*overflow:\s*hidden;/);
+  assert.match(css, /-webkit-line-clamp:\s*2/);
+  assert.match(css, /overflow-wrap:\s*anywhere/);
+});
