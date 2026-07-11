@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
-import properLockfile from "proper-lockfile";
+import { MessageChannel, receiveMessageOnPort, Worker } from "node:worker_threads";
 
 import { hasPendingMigrations, runMigrations } from "./migrations.js";
 
@@ -27,44 +27,109 @@ function createPreMigrationSnapshot(db, backupsDir) {
   db.exec(`VACUUM INTO '${escapedPath}'`);
 }
 
-const LOCK_RETRIES = 50;
-const LOCK_RETRY_FACTOR = 1.2;
-const LOCK_RETRY_MIN_MS = 50;
-const LOCK_RETRY_MAX_MS = 250;
+const ACQUIRE_STATE = 0;
+const RELEASE_STATE = 1;
+const FAILED = 2;
+const DEFAULT_ACQUIRE_TIMEOUT_MS = 20_000;
+const DEFAULT_RELEASE_TIMEOUT_MS = 5_000;
+const DEFAULT_LOCK_OPTIONS = {
+  realpath: false,
+  stale: 10_000,
+  update: 2_000,
+  retries: { retries: 50, factor: 1.2, minTimeout: 50, maxTimeout: 250 }
+};
 
-function sleep(milliseconds) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+function deserializeError(payload, fallbackMessage) {
+  const error = new Error(payload?.message || fallbackMessage);
+  error.name = payload?.name || "Error";
+  if (payload?.code) error.code = payload.code;
+  if (payload?.stack) error.stack = payload.stack;
+  return error;
 }
 
-function lockDatabaseForInitialization(dbPath, onCompromised) {
-  // proper-lockfile's sync adapter rejects retry options, so apply the same policy around lockSync.
-  let delay = LOCK_RETRY_MIN_MS;
-  for (let retry = 0; ; retry += 1) {
-    try {
-      return properLockfile.lockSync(dbPath, {
-        realpath: false,
-        stale: 10_000,
-        update: 2_000,
-        onCompromised
-      });
-    } catch (error) {
-      if (error.code !== "ELOCKED" || retry >= LOCK_RETRIES) throw error;
-    }
+function receivePhaseMessage(port, phase) {
+  let received;
+  while ((received = receiveMessageOnPort(port))) {
+    if (received.message?.phase === phase) return received.message;
+  }
+  return null;
+}
 
-    sleep(delay);
-    delay = Math.min(delay * LOCK_RETRY_FACTOR, LOCK_RETRY_MAX_MS);
+function waitForWorkerState(lock, index, timeoutMs, phase) {
+  const result = Atomics.wait(lock.state, index, 0, timeoutMs);
+  const status = Atomics.load(lock.state, index);
+  const message = receivePhaseMessage(lock.port, phase);
+
+  if (result === "timed-out" && status === 0) {
+    throw new Error(`Timed out waiting for database initialization lock ${phase}`);
+  }
+  if (status === FAILED) {
+    throw deserializeError(message?.error, `Database initialization lock worker failed during ${phase}`);
+  }
+  if (status !== 1) {
+    throw new Error(`Database initialization lock worker exited unexpectedly during ${phase}`);
   }
 }
 
-export function initDb(dbPath, { backupsDir = path.join(path.dirname(dbPath), "backups") } = {}) {
+function startInitializationLockWorker(dbPath, internalTestOptions = {}) {
+  const stateBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 3);
+  const state = new Int32Array(stateBuffer);
+  const { port1, port2 } = new MessageChannel();
+  const lockOptions = {
+    ...DEFAULT_LOCK_OPTIONS,
+    ...internalTestOptions.lockOptions
+  };
+  const worker = new Worker(new URL("./initLockWorker.js", import.meta.url), {
+    execArgv: [],
+    workerData: { dbPath, lockOptions, stateBuffer, controlPort: port2 },
+    transferList: [port2]
+  });
+  worker.on("error", () => {});
+
+  const lock = { worker, port: port1, state };
+  try {
+    waitForWorkerState(
+      lock,
+      ACQUIRE_STATE,
+      internalTestOptions.acquireTimeoutMs ?? DEFAULT_ACQUIRE_TIMEOUT_MS,
+      "acquire"
+    );
+    return lock;
+  } catch (error) {
+    port1.postMessage({ type: "release" });
+    port1.close();
+    void worker.terminate();
+    throw error;
+  }
+}
+
+function releaseInitializationLockWorker(lock, internalTestOptions = {}) {
+  lock.port.postMessage({ type: "release" });
+  try {
+    waitForWorkerState(
+      lock,
+      RELEASE_STATE,
+      internalTestOptions.releaseTimeoutMs ?? DEFAULT_RELEASE_TIMEOUT_MS,
+      "release"
+    );
+  } finally {
+    lock.port.close();
+    void lock.worker.terminate();
+  }
+}
+
+export function initDb(dbPath, {
+  backupsDir = path.join(path.dirname(dbPath), "backups"),
+  internalTestOptions = {}
+} = {}) {
   let compromisedError;
   let initializationError;
-  let releaseLock;
+  let lock;
   let db;
   try {
-    releaseLock = lockDatabaseForInitialization(dbPath, (error) => {
-      compromisedError ??= error;
-    });
+    mkdirSync(path.dirname(dbPath), { recursive: true });
+    lock = startInitializationLockWorker(dbPath, internalTestOptions);
+    internalTestOptions.afterLockAcquired?.();
     db = openDb(dbPath);
     if (hasExistingSchema(db) && hasPendingMigrations(db)) {
       createPreMigrationSnapshot(db, backupsDir);
@@ -79,9 +144,10 @@ export function initDb(dbPath, { backupsDir = path.join(path.dirname(dbPath), "b
       initializationError ??= error;
     } finally {
       try {
-        releaseLock?.();
+        if (lock) releaseInitializationLockWorker(lock, internalTestOptions);
       } catch (error) {
-        if (!compromisedError) initializationError ??= error;
+        if (error.code === "ECOMPROMISED") compromisedError = error;
+        else initializationError ??= error;
       }
     }
   }

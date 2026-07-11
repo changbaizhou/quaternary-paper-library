@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { spawn } from "node:child_process";
-import { mkdirSync, utimesSync } from "node:fs";
+import { existsSync, mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -13,11 +13,31 @@ function wait(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-function runInitProcess(dbPath, backupsDir) {
+async function waitFor(predicate, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("Timed out waiting for test condition");
+    await wait(10);
+  }
+}
+
+function runInitProcess(dbPath, backupsDir, testConfig = {}) {
   const databaseModuleUrl = new URL("../src/database.js", import.meta.url).href;
   const script = `
+    import { writeFileSync } from "node:fs";
     import { initDb } from ${JSON.stringify(databaseModuleUrl)};
-    initDb(process.env.QPL_TEST_DB_PATH, { backupsDir: process.env.QPL_TEST_BACKUPS_DIR });
+    const config = JSON.parse(process.env.QPL_TEST_CONFIG);
+    const internalTestOptions = { lockOptions: config.lockOptions };
+    if (config.acquiredMarkerPath) {
+      internalTestOptions.afterLockAcquired = () => {
+        writeFileSync(config.acquiredMarkerPath, "acquired");
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, config.holdLockMs);
+      };
+    }
+    initDb(process.env.QPL_TEST_DB_PATH, {
+      backupsDir: process.env.QPL_TEST_BACKUPS_DIR,
+      internalTestOptions
+    });
   `;
 
   return new Promise((resolve, reject) => {
@@ -26,7 +46,8 @@ function runInitProcess(dbPath, backupsDir) {
         PATH: process.env.PATH,
         SystemRoot: process.env.SystemRoot,
         QPL_TEST_DB_PATH: dbPath,
-        QPL_TEST_BACKUPS_DIR: backupsDir
+        QPL_TEST_BACKUPS_DIR: backupsDir,
+        QPL_TEST_CONFIG: JSON.stringify(testConfig)
       },
       stdio: ["ignore", "pipe", "pipe"]
     });
@@ -42,6 +63,62 @@ function runInitProcess(dbPath, backupsDir) {
     });
   });
 }
+
+test("initDb creates a missing nested database parent before locking", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-parent-"));
+  const dbPath = path.join(dir, "missing", "nested", "library.sqlite");
+
+  try {
+    initDb(dbPath);
+    const db = openDb(dbPath);
+    const versions = db.prepare("SELECT version FROM schema_migrations").all();
+    db.close();
+    assert.deepEqual(versions.map((item) => item.version), [1]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("lock heartbeat remains live during long synchronous initialization", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-heartbeat-"));
+  const dbPath = path.join(dir, "library.sqlite");
+  const backupsDir = path.join(dir, "migration-backups");
+  const acquiredMarkerPath = path.join(dir, "owner-acquired");
+  const lockOptions = {
+    stale: 2_000,
+    update: 1_000,
+    retries: { retries: 50, factor: 1.2, minTimeout: 50, maxTimeout: 250 }
+  };
+
+  try {
+    const legacy = openDb(dbPath);
+    legacy.exec(`
+      CREATE TABLE drafts (id INTEGER PRIMARY KEY, stored_filename TEXT DEFAULT '', stored_path TEXT DEFAULT '');
+      CREATE TABLE papers (id INTEGER PRIMARY KEY, stored_filename TEXT DEFAULT '', stored_path TEXT DEFAULT '');
+    `);
+    legacy.close();
+
+    const owner = runInitProcess(dbPath, backupsDir, {
+      lockOptions,
+      acquiredMarkerPath,
+      holdLockMs: 3_500
+    });
+    await waitFor(() => existsSync(acquiredMarkerPath));
+
+    let contenderCompleted = false;
+    const contender = runInitProcess(dbPath, backupsDir, { lockOptions }).then(() => {
+      contenderCompleted = true;
+    });
+    await wait(2_600);
+    assert.equal(contenderCompleted, false);
+
+    await Promise.all([owner, contender]);
+    const snapshots = (await readdir(backupsDir)).filter((name) => /^pre-migration-.*\.sqlite$/.test(name));
+    assert.equal(snapshots.length, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 test("initDb waits for an existing proper-lockfile lock", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-lock-"));
@@ -75,6 +152,119 @@ test("initDb waits for an existing proper-lockfile lock", async () => {
     assert.deepEqual(versions.map((item) => item.version), [1]);
   } finally {
     release?.();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("lock worker cleans up after acquisition failure", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-lock-failure-"));
+  const dbPath = path.join(dir, "library.sqlite");
+  let release;
+
+  try {
+    const legacy = openDb(dbPath);
+    legacy.exec(`
+      CREATE TABLE drafts (id INTEGER PRIMARY KEY, stored_filename TEXT DEFAULT '', stored_path TEXT DEFAULT '');
+      CREATE TABLE papers (id INTEGER PRIMARY KEY, stored_filename TEXT DEFAULT '', stored_path TEXT DEFAULT '');
+    `);
+    legacy.close();
+
+    release = properLockfile.lockSync(dbPath, { realpath: false });
+    assert.throws(
+      () => initDb(dbPath, {
+        internalTestOptions: {
+          lockOptions: { retries: 0 },
+          acquireTimeoutMs: 2_000
+        }
+      }),
+      /already being held/
+    );
+    release();
+    release = null;
+
+    initDb(dbPath);
+    const migrated = openDb(dbPath);
+    const versions = migrated.prepare("SELECT version FROM schema_migrations").all();
+    migrated.close();
+    assert.deepEqual(versions.map((item) => item.version), [1]);
+  } finally {
+    release?.();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("lock worker times out acquisition and leaves no owned lock", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-lock-timeout-"));
+  const dbPath = path.join(dir, "library.sqlite");
+  let release;
+
+  try {
+    const legacy = openDb(dbPath);
+    legacy.exec(`
+      CREATE TABLE drafts (id INTEGER PRIMARY KEY, stored_filename TEXT DEFAULT '', stored_path TEXT DEFAULT '');
+      CREATE TABLE papers (id INTEGER PRIMARY KEY, stored_filename TEXT DEFAULT '', stored_path TEXT DEFAULT '');
+    `);
+    legacy.close();
+
+    release = properLockfile.lockSync(dbPath, { realpath: false });
+    assert.throws(
+      () => initDb(dbPath, {
+        internalTestOptions: { acquireTimeoutMs: 100 }
+      }),
+      /Timed out waiting for database initialization lock/
+    );
+    release();
+    release = null;
+
+    initDb(dbPath);
+    const migrated = openDb(dbPath);
+    const versions = migrated.prepare("SELECT version FROM schema_migrations").all();
+    migrated.close();
+    assert.deepEqual(versions.map((item) => item.version), [1]);
+  } finally {
+    release?.();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("compromised worker lock fails safely and permits retry", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-lock-compromised-"));
+  const dbPath = path.join(dir, "library.sqlite");
+  const acquiredMarkerPath = path.join(dir, "owner-acquired");
+
+  try {
+    const legacy = openDb(dbPath);
+    legacy.exec(`
+      CREATE TABLE drafts (id INTEGER PRIMARY KEY, stored_filename TEXT DEFAULT '', stored_path TEXT DEFAULT '');
+      CREATE TABLE papers (id INTEGER PRIMARY KEY, stored_filename TEXT DEFAULT '', stored_path TEXT DEFAULT '');
+    `);
+    legacy.close();
+
+    const ownerResult = runInitProcess(dbPath, path.join(dir, "backups"), {
+      lockOptions: {
+        stale: 2_000,
+        update: 1_000,
+        retries: { retries: 0 }
+      },
+      acquiredMarkerPath,
+      holdLockMs: 1_500
+    }).then(
+      () => null,
+      (error) => error
+    );
+    await waitFor(() => existsSync(acquiredMarkerPath));
+    await rm(`${dbPath}.lock`, { recursive: true, force: true });
+
+    const compromiseError = await ownerResult;
+    assert.ok(compromiseError instanceof Error);
+    assert.match(compromiseError.message, /ECOMPROMISED/);
+
+    initDb(dbPath);
+    const migrated = openDb(dbPath);
+    const versions = migrated.prepare("SELECT version FROM schema_migrations").all();
+    migrated.close();
+    assert.deepEqual(versions.map((item) => item.version), [1]);
+  } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });
