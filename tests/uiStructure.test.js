@@ -41,7 +41,9 @@ test("frontend reader resets state when returning to the list", async () => {
   const script = await readFile("public/app.js", "utf8");
 
   assert.match(script, /closeReaderAndShowList/);
-  assert.match(script, /state\.selectedPaper = null/);
+  const start = script.indexOf("async function closeReaderAndShowList");
+  const end = script.indexOf("async function loadDrafts", start);
+  assert.doesNotMatch(script.slice(start, end), /state\.selectedPaper\s*=\s*null/);
   assert.match(script, /setStatus\("本地资料库"\)/);
 });
 
@@ -122,4 +124,50 @@ test("paper save status has a stable bounded text block", async () => {
   assert.match(css, /\.paper-save-status\s*\{[\s\S]*overflow:\s*hidden;/);
   assert.match(css, /-webkit-line-clamp:\s*2/);
   assert.match(css, /overflow-wrap:\s*anywhere/);
+});
+
+test("returning from the reader preserves the selected paper detail", async () => {
+  const script = await readFile("public/app.js", "utf8");
+  const start = script.indexOf("async function closeReaderAndShowList");
+  const end = script.indexOf("async function loadDrafts", start);
+  const closeReader = script.slice(start, end);
+
+  assert.match(closeReader, /closeReaderDocument\(\)/);
+  assert.doesNotMatch(closeReader, /state\.selectedPaper\s*=\s*null/);
+  assert.match(closeReader, /showPaperListView\(\)/);
+  assert.match(script, /fillFormFromPaper\(paper\);\s*await openPaperReader\(paper\)/);
+});
+
+test("paper saves coordinate dirty notes and prevent concurrent metadata submits", async () => {
+  const script = await readFile("public/app.js", "utf8");
+
+  assert.match(script, /notesDirty:\s*false/);
+  assert.match(script, /noteSavePromise:\s*null/);
+  assert.match(script, /metadataSavePromise:\s*null/);
+  assert.match(script, /await flushPendingNotes\(\)/);
+  assert.match(script, /saveElements\.button\.disabled\s*=\s*true/);
+  assert.match(script, /state\.notesDirty\s*=\s*true/);
+});
+
+test("reading progress serializes writes and merges only progress fields", async () => {
+  const script = await readFile("public/app.js", "utf8");
+
+  assert.match(script, /READING_PROGRESS_AUTOSAVE_DELAY_MS/);
+  assert.match(script, /pendingProgress/);
+  assert.match(script, /progressSavePromise/);
+  assert.match(script, /mergeReadingProgressIntoState/);
+  const progressStart = script.indexOf("async function saveReadingProgress");
+  const progressEnd = script.indexOf("\n}\n\nfunction recordLastReadPage", progressStart);
+  const progressSave = script.slice(progressStart, progressEnd);
+  assert.doesNotMatch(progressSave, /patchPaperInState\(updatedPaper\)/);
+});
+
+test("409 recovery retains local edits and reports reload failures", async () => {
+  const script = await readFile("public/app.js", "utf8");
+
+  assert.match(script, /已保留本地修改/);
+  assert.match(script, /const latestPaper = state\.papers\.find/);
+  assert.match(script, /state\.selectedPaper = latestPaper/);
+  assert.match(script, /刷新失败/);
+  assert.match(script, /reloadPapersAfterConflict\(\)/);
 });
