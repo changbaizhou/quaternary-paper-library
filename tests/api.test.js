@@ -80,6 +80,101 @@ test("API workflow creates draft, confirms paper, searches, and exports", async 
   });
 });
 
+test("API edits confirmed paper metadata and notes with conflict protection", async () => {
+  await withServer(async (baseUrl) => {
+    const createResponse = await fetch(`${baseUrl}/api/drafts/from-text`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ filename: "edit.pdf", text: "Original paper title\nAbstract\nEdit test." })
+    });
+    const draft = await createResponse.json();
+    const confirmResponse = await fetch(`${baseUrl}/api/drafts/${draft.id}/confirm`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Original title" })
+    });
+    const paper = await confirmResponse.json();
+
+    const editResponse = await fetch(`${baseUrl}/api/papers/${paper.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        expectedVersion: 1,
+        title: "Edited title",
+        version: 99,
+        storedPath: "outside/library.pdf",
+        fileSha256: "mutated",
+        deletedAt: "2026-01-01",
+        mergedIntoId: 42
+      })
+    });
+    assert.equal(editResponse.status, 200);
+    const edited = await editResponse.json();
+    assert.equal(edited.version, 2);
+    assert.equal(edited.title, "Edited title");
+    assert.equal(edited.storedPath, paper.storedPath);
+    assert.equal(edited.fileSha256, paper.fileSha256);
+    assert.equal(edited.deletedAt, null);
+    assert.equal(edited.mergedIntoId, null);
+
+    const staleResponse = await fetch(`${baseUrl}/api/papers/${paper.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expectedVersion: 1, title: "Stale title" })
+    });
+    assert.equal(staleResponse.status, 409);
+
+    const notesResponse = await fetch(`${baseUrl}/api/papers/${paper.id}/notes`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expectedVersion: 2, notesPersonal: "Autosaved note", title: "Blocked" })
+    });
+    assert.equal(notesResponse.status, 200);
+    const noted = await notesResponse.json();
+    assert.equal(noted.notesPersonal, "Autosaved note");
+    assert.equal(noted.title, "Edited title");
+    assert.equal(noted.version, 3);
+  });
+});
+
+test("API validates confirmed paper edits", async () => {
+  await withServer(async (baseUrl) => {
+    const createResponse = await fetch(`${baseUrl}/api/drafts/from-text`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ filename: "validation.pdf", text: "Validation paper" })
+    });
+    const draft = await createResponse.json();
+    const confirmResponse = await fetch(`${baseUrl}/api/drafts/${draft.id}/confirm`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Validation paper" })
+    });
+    const paper = await confirmResponse.json();
+
+    for (const body of [
+      { expectedVersion: 0, title: "Invalid version" },
+      { expectedVersion: 1, title: " " },
+      { expectedVersion: 1, year: "2026" },
+      { expectedVersion: 1, authors: "One Author" }
+    ]) {
+      const response = await fetch(`${baseUrl}/api/papers/${paper.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      assert.equal(response.status, 400);
+    }
+
+    const missingResponse = await fetch(`${baseUrl}/api/papers/999999`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expectedVersion: 1, title: "Missing" })
+    });
+    assert.equal(missingResponse.status, 404);
+  });
+});
+
 test("API falls back to decoded filename when extracted PDF text is sparse", async () => {
   await withServer(async (baseUrl) => {
     const createResponse = await fetch(`${baseUrl}/api/drafts/from-text`, {

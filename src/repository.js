@@ -1,4 +1,5 @@
 import { openDb } from "./database.js";
+import { metadataFields, normalizeDoi, normalizeTitle, noteFields } from "./paperData.js";
 
 const draftJsonFields = {
   authors: "authors_json",
@@ -19,6 +20,33 @@ const paperJsonFields = {
   methods: "methods_json",
   proxies: "proxies_json"
 };
+
+const paperColumns = {
+  doi: "doi",
+  title: "title",
+  authors: "authors_json",
+  journal: "journal",
+  year: "year",
+  abstract: "abstract",
+  keywords: "keywords_json",
+  themes: "themes_json",
+  regions: "regions_json",
+  periods: "periods_json",
+  materials: "materials_json",
+  methods: "methods_json",
+  proxies: "proxies_json",
+  readingStatus: "reading_status",
+  notesResearchQuestion: "notes_research_question",
+  notesRegion: "notes_region",
+  notesMaterialsMethods: "notes_materials_methods",
+  notesChronology: "notes_chronology",
+  notesCoreFindings: "notes_core_findings",
+  notesLimits: "notes_limits",
+  notesQuotePoints: "notes_quote_points",
+  notesPersonal: "notes_personal"
+};
+
+const editableFields = [...metadataFields, ...noteFields];
 
 function toJson(value, fallback) {
   return JSON.stringify(value ?? fallback);
@@ -51,6 +79,8 @@ function mapDraft(row) {
     classification: parseJson(row.classification_json, {}),
     confidence: parseJson(row.confidence_json, {}),
     evidence: parseJson(row.evidence_json, {}),
+    fileSha256: row.file_sha256,
+    duplicateCandidates: parseJson(row.duplicate_candidates_json, []),
     extractedText: row.extracted_text,
     createdAt: row.created_at
   };
@@ -63,8 +93,11 @@ function mapPaper(row) {
     sourceDraftId: row.source_draft_id,
     storedFilename: row.stored_filename,
     storedPath: row.stored_path,
+    fileSha256: row.file_sha256,
     doi: row.doi,
+    normalizedDoi: row.normalized_doi,
     title: row.title,
+    normalizedTitle: row.normalized_title,
     authors: parseJson(row.authors_json, []),
     journal: row.journal,
     year: row.year,
@@ -87,9 +120,21 @@ function mapPaper(row) {
     notesPersonal: row.notes_personal,
     bookmarkPage: row.bookmark_page,
     lastReadPage: row.last_read_page,
+    version: row.version,
+    deletedAt: row.deleted_at,
+    mergedIntoId: row.merged_into_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
+}
+
+export class VersionConflictError extends Error {
+  constructor(expectedVersion, actualVersion) {
+    super(`Paper version conflict: expected ${expectedVersion}, found ${actualVersion}`);
+    this.name = "VersionConflictError";
+    this.expectedVersion = expectedVersion;
+    this.actualVersion = actualVersion;
+  }
 }
 
 function normalizePageNumber(value) {
@@ -154,8 +199,9 @@ export class PaperRepository {
         INSERT INTO drafts (
           original_filename, stored_filename, stored_path, doi, title, authors_json,
           journal, year, abstract, author_keywords_json, suggested_keywords_json,
-          classification_json, confidence_json, evidence_json, extracted_text
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          classification_json, confidence_json, evidence_json, file_sha256,
+          duplicate_candidates_json, extracted_text
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       const result = stmt.run(
         input.originalFilename || "",
@@ -172,6 +218,8 @@ export class PaperRepository {
         toJson(input.classification, {}),
         toJson(input.confidence, {}),
         toJson(input.evidence, {}),
+        input.fileSha256 || "",
+        toJson(input.duplicateCandidates, []),
         input.extractedText || ""
       );
       return Number(result.lastInsertRowid);
@@ -209,6 +257,7 @@ export class PaperRepository {
         sourceDraftId: draft.id,
         storedFilename: overrides.storedFilename ?? draft.storedFilename,
         storedPath: overrides.storedPath ?? draft.storedPath,
+        fileSha256: draft.fileSha256,
         doi: overrides.doi ?? draft.doi,
         title: overrides.title ?? draft.title,
         authors: overrides.authors ?? draft.authors,
@@ -236,20 +285,24 @@ export class PaperRepository {
       const result = db
         .prepare(`
           INSERT INTO papers (
-            source_draft_id, stored_filename, stored_path, doi, title, authors_json,
+            source_draft_id, stored_filename, stored_path, file_sha256, doi, normalized_doi,
+            title, normalized_title, authors_json,
             journal, year, abstract, keywords_json, themes_json, regions_json,
             periods_json, materials_json, methods_json, proxies_json, reading_status,
             notes_research_question, notes_region, notes_materials_methods,
             notes_chronology, notes_core_findings, notes_limits, notes_quote_points,
             notes_personal, search_text
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `)
         .run(
           paper.sourceDraftId,
           paper.storedFilename,
           paper.storedPath,
+          paper.fileSha256,
           paper.doi,
+          normalizeDoi(paper.doi),
           paper.title,
+          normalizeTitle(paper.title),
           toJson(paper.authors, []),
           paper.journal,
           paper.year,
@@ -280,6 +333,56 @@ export class PaperRepository {
 
   getPaper(id) {
     return this.withDb((db) => mapPaper(db.prepare("SELECT * FROM papers WHERE id = ?").get(id)));
+  }
+
+  updatePaper(id, changes = {}) {
+    return this.withDb((db) => {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const current = mapPaper(db.prepare("SELECT * FROM papers WHERE id = ?").get(id));
+        if (!current) {
+          db.exec("ROLLBACK");
+          return null;
+        }
+        if (changes.expectedVersion !== current.version) {
+          throw new VersionConflictError(changes.expectedVersion, current.version);
+        }
+
+        const paper = { ...current };
+        for (const field of editableFields) {
+          if (Object.hasOwn(changes, field)) paper[field] = changes[field];
+        }
+        if (!String(paper.title || "").trim()) {
+          throw new TypeError("Title must not be empty");
+        }
+
+        const assignments = [];
+        const values = [];
+        for (const field of editableFields) {
+          assignments.push(`${paperColumns[field]} = ?`);
+          values.push(Object.hasOwn(paperJsonFields, field) ? toJson(paper[field], []) : paper[field]);
+        }
+        assignments.push("normalized_doi = ?", "normalized_title = ?", "search_text = ?");
+        values.push(normalizeDoi(paper.doi), normalizeTitle(paper.title), makeSearchText(paper));
+
+        const result = db.prepare(`
+          UPDATE papers
+          SET ${assignments.join(", ")}, version = version + 1, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND version = ?
+        `).run(...values, id, current.version);
+        if (Number(result.changes) !== 1) {
+          const latest = db.prepare("SELECT version FROM papers WHERE id = ?").get(id);
+          throw new VersionConflictError(current.version, latest?.version);
+        }
+
+        const updated = mapPaper(db.prepare("SELECT * FROM papers WHERE id = ?").get(id));
+        db.exec("COMMIT");
+        return updated;
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    });
   }
 
   updateReadingProgress(id, progress = {}) {

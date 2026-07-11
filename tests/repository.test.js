@@ -95,3 +95,36 @@ test("repository stores one bookmark and last read page per paper", async () => 
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("repository updates confirmed papers and rejects stale versions", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-repo-"));
+  const dbPath = path.join(dir, "library.sqlite");
+
+  try {
+    initDb(dbPath);
+    const repo = new PaperRepository(dbPath);
+    const draftId = repo.createDraft({
+      title: "Holocene record",
+      classification: {},
+      confidence: {},
+      evidence: {}
+    });
+    const paperId = repo.confirmDraft(draftId);
+
+    const updated = repo.updatePaper(paperId, {
+      expectedVersion: 1,
+      title: "Revised Holocene record",
+      notesCoreFindings: "The revised note is searchable."
+    });
+
+    assert.equal(updated.version, 2);
+    assert.equal(updated.title, "Revised Holocene record");
+    assert.equal(repo.searchPapers({ query: "revised note" })[0].id, paperId);
+    assert.throws(
+      () => repo.updatePaper(paperId, { expectedVersion: 1, title: "Stale edit" }),
+      (error) => error.name === "VersionConflictError"
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -9,6 +9,7 @@ import { initDb } from "./database.js";
 import { exportBibtex, exportCsv, exportMarkdown } from "./exporters.js";
 import { lookupDoiMetadata, lookupTitleMetadata } from "./metadata.js";
 import { extractOcrText as defaultExtractOcrText } from "./ocr.js";
+import { metadataFields, noteFields } from "./paperData.js";
 import {
   detectDoi,
   decodePossiblyMojibakeFilename,
@@ -23,11 +24,69 @@ import {
   parseKeywords,
   parseYear
 } from "./pdfExtract.js";
-import { PaperRepository } from "./repository.js";
+import { PaperRepository, VersionConflictError } from "./repository.js";
 import { classifyText } from "./taxonomy.js";
 import { translateText, TranslationError } from "./translation.js";
 
 const upload = multer({ storage: multer.memoryStorage() });
+const arrayPaperFields = new Set([
+  "authors", "keywords", "themes", "regions", "periods", "materials", "methods", "proxies"
+]);
+
+function validateExpectedVersion(value) {
+  if (!Number.isInteger(value) || value < 1) {
+    throw new TypeError("expectedVersion must be a positive integer");
+  }
+}
+
+function pickPaperChanges(body, allowedFields) {
+  validateExpectedVersion(body.expectedVersion);
+  const changes = { expectedVersion: body.expectedVersion };
+
+  for (const field of allowedFields) {
+    if (!Object.hasOwn(body, field)) continue;
+    const value = body[field];
+    if (arrayPaperFields.has(field)) {
+      if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+        throw new TypeError(`${field} must be an array of strings`);
+      }
+    } else if (field === "year") {
+      if (value !== null && (!Number.isInteger(value) || value < 1)) {
+        throw new TypeError("year must be a positive integer or null");
+      }
+    } else if (typeof value !== "string") {
+      throw new TypeError(`${field} must be a string`);
+    }
+    if (field === "title" && !value.trim()) {
+      throw new TypeError("title must not be empty");
+    }
+    changes[field] = value;
+  }
+
+  return changes;
+}
+
+function updatePaperResponse(repo, request, response, allowedFields) {
+  try {
+    const changes = pickPaperChanges(request.body || {}, allowedFields);
+    const paper = repo.updatePaper(Number(request.params.id), changes);
+    if (!paper) {
+      response.status(404).json({ error: "Paper not found" });
+      return;
+    }
+    response.json(paper);
+  } catch (error) {
+    if (error instanceof VersionConflictError) {
+      response.status(409).json({ error: error.message });
+      return;
+    }
+    if (error instanceof TypeError) {
+      response.status(400).json({ error: error.message });
+      return;
+    }
+    throw error;
+  }
+}
 
 function slugify(value) {
   return String(value || "paper")
@@ -253,6 +312,22 @@ export function createApp(options = {}) {
         filters: parseFilters(request.query)
       })
     );
+  });
+
+  app.patch("/api/papers/:id", (request, response, next) => {
+    try {
+      updatePaperResponse(repo, request, response, metadataFields);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.patch("/api/papers/:id/notes", (request, response, next) => {
+    try {
+      updatePaperResponse(repo, request, response, noteFields);
+    } catch (error) {
+      next(error);
+    }
   });
 
   app.patch("/api/papers/:id/reading-progress", (request, response, next) => {
