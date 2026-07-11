@@ -78,6 +78,13 @@ test("API workflow creates draft, confirms paper, searches, and exports", async 
     const confirmed = await confirmResponse.json();
     assert.equal(confirmed.title, "Holocene pollen record from a lake core");
 
+    const repeatedConfirm = await fetch(`${baseUrl}/api/drafts/${draft.id}/confirm`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Duplicate confirmation" })
+    });
+    assert.equal(repeatedConfirm.status, 409);
+
     const searchResponse = await fetch(`${baseUrl}/api/papers?query=monsoon&regions=Qinghai-Tibet%20Plateau`);
     const papers = await searchResponse.json();
     assert.equal(papers.length, 1);

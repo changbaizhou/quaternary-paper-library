@@ -754,6 +754,9 @@ export class PaperRepository {
       try {
         const draft = mapDraft(db.prepare("SELECT * FROM drafts WHERE id = ?").get(id));
         if (!draft) throw new DraftNotFoundError();
+        if (draft.status !== "pending") {
+          throw new PaperStateError("Only pending drafts can be confirmed");
+        }
 
       const classification = {
         themes: overrides.themes ?? draft.classification.themes ?? [],
@@ -857,7 +860,12 @@ export class PaperRepository {
         `).run(Number(result.lastInsertRowid), paper.storedFilename, paper.storedPath, paper.fileSha256);
       }
 
-        db.prepare("UPDATE drafts SET status = 'confirmed' WHERE id = ?").run(id);
+        const statusUpdate = db.prepare(
+          "UPDATE drafts SET status = 'confirmed' WHERE id = ? AND status = 'pending'"
+        ).run(id);
+        if (statusUpdate.changes !== 1) {
+          throw new PaperStateError("Only pending drafts can be confirmed");
+        }
         db.exec("COMMIT");
         return Number(result.lastInsertRowid);
       } catch (error) {

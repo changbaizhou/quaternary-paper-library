@@ -596,6 +596,26 @@ test("repository confirms a missing draft with DraftNotFoundError", async () => 
   }
 });
 
+test("repository confirms each pending draft only once", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-confirm-once-"));
+  const dbPath = path.join(dir, "library.sqlite");
+
+  try {
+    initDb(dbPath);
+    const repo = new PaperRepository(dbPath);
+    const draftId = repo.createDraft({ title: "Confirm once", classification: {} });
+
+    repo.confirmDraft(draftId);
+    assert.throws(
+      () => repo.confirmDraft(draftId),
+      (error) => error.name === "PaperStateError"
+    );
+    assert.equal(repo.searchPapers().length, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("repository merges complementary paper data, files, and traceability in one operation", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-paper-merge-"));
   const dbPath = path.join(dir, "library.sqlite");
