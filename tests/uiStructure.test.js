@@ -102,3 +102,15 @@ test("frontend reader automatically translates selected PDF text", async () => {
   assert.match(script, /lastTranslatedSelection/);
   assert.match(script, /pendingTranslationSelection/);
 });
+
+test("paper detail exposes metadata save and notes autosave wiring", async () => {
+  const html = await readFile("public/index.html", "utf8");
+  const script = await readFile("public/app.js", "utf8");
+
+  assert.match(html, /id="savePaperButton"/);
+  assert.match(html, /id="paperSaveStatus"/);
+  assert.match(script, /\/api\/papers\/\$\{state\.selectedPaper\.id\}/);
+  assert.match(script, /\/api\/papers\/\$\{state\.selectedPaper\.id\}\/notes/);
+  assert.match(script, /expectedVersion/);
+  assert.match(script, /NOTE_AUTOSAVE_DELAY_MS/);
+});

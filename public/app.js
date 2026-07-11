@@ -7,12 +7,27 @@ const MAX_CANVAS_SCALE = 3;
 const MIN_READER_SCALE = 0.75;
 const MAX_READER_SCALE = 2.6;
 const AUTO_TRANSLATE_DELAY_MS = 450;
+const NOTE_AUTOSAVE_DELAY_MS = 800;
+
+const noteFieldNames = [
+  "readingStatus",
+  "notesResearchQuestion",
+  "notesRegion",
+  "notesMaterialsMethods",
+  "notesChronology",
+  "notesCoreFindings",
+  "notesLimits",
+  "notesQuotePoints",
+  "notesPersonal"
+];
 
 const state = {
   drafts: [],
   papers: [],
   selectedDraft: null,
   selectedPaper: null,
+  noteAutosaveTimer: null,
+  noteSaveRequestId: 0,
   reader: {
     document: null,
     loadingTask: null,
@@ -59,6 +74,11 @@ const fields = {
   notesLimits: document.querySelector("#notesLimitsField"),
   notesQuotePoints: document.querySelector("#notesQuotePointsField"),
   notesPersonal: document.querySelector("#notesPersonalField")
+};
+
+const saveElements = {
+  button: document.querySelector("#savePaperButton"),
+  status: document.querySelector("#paperSaveStatus")
 };
 
 const readerElements = {
@@ -125,10 +145,23 @@ async function api(path, options = {}) {
   const response = await fetch(path, options);
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    throw new Error(body.error || `HTTP ${response.status}`);
+    const error = new Error(body.error || `HTTP ${response.status}`);
+    error.status = response.status;
+    throw error;
   }
   const type = response.headers.get("content-type") || "";
   return type.includes("application/json") ? response.json() : response.text();
+}
+
+function setPaperSaveState(text, stateClass) {
+  saveElements.status.textContent = text;
+  saveElements.status.className = `paper-save-status ${stateClass}`;
+}
+
+function clearNoteAutosave() {
+  if (state.noteAutosaveTimer) clearTimeout(state.noteAutosaveTimer);
+  state.noteAutosaveTimer = null;
+  state.noteSaveRequestId += 1;
 }
 
 function chip(label, className = "") {
@@ -189,6 +222,7 @@ function renderPapers() {
 }
 
 function fillFormFromDraft(draft) {
+  clearNoteAutosave();
   state.selectedDraft = draft;
   state.selectedPaper = null;
   document.querySelector("#detailTitle").textContent = "自动识别结果";
@@ -208,18 +242,11 @@ function fillFormFromDraft(draft) {
   fields.methods.value = joinList(draft.classification?.methods);
   fields.proxies.value = joinList(draft.classification?.proxies);
   fields.readingStatus.value = "to-read";
-  for (const key of [
-    "notesResearchQuestion",
-    "notesRegion",
-    "notesMaterialsMethods",
-    "notesChronology",
-    "notesCoreFindings",
-    "notesLimits",
-    "notesQuotePoints",
-    "notesPersonal"
-  ]) {
+  for (const key of noteFieldNames.slice(1)) {
     fields[key].value = "";
   }
+  saveElements.button.textContent = "确认入库";
+  setPaperSaveState("未修改", "is-neutral");
   renderEvidence(draft);
 }
 
@@ -237,6 +264,7 @@ function renderEvidence(draft) {
 }
 
 function fillFormFromPaper(paper) {
+  clearNoteAutosave();
   state.selectedDraft = null;
   state.selectedPaper = paper;
   document.querySelector("#detailTitle").textContent = "论文详情";
@@ -264,6 +292,8 @@ function fillFormFromPaper(paper) {
   fields.notesLimits.value = paper.notesLimits || "";
   fields.notesQuotePoints.value = paper.notesQuotePoints || "";
   fields.notesPersonal.value = paper.notesPersonal || "";
+  saveElements.button.textContent = "保存更改";
+  setPaperSaveState("已保存", "is-success");
   document.querySelector("#evidenceBox").textContent = "已确认论文";
 }
 
@@ -678,6 +708,7 @@ async function openPaperReader(paper) {
 
 async function closeReaderAndShowList() {
   await closeReaderDocument();
+  clearNoteAutosave();
   state.selectedPaper = null;
   readerElements.viewer.innerHTML = `<div class="empty-state">选择论文后阅读原文件</div>`;
   updateTranslationPanel("未选择文本", "", { hidden: true });
@@ -711,7 +742,7 @@ async function loadPapers() {
   renderPapers();
 }
 
-function formPayload() {
+function metadataPayload() {
   return {
     title: fields.title.value.trim(),
     authors: splitList(fields.authors.value),
@@ -725,7 +756,12 @@ function formPayload() {
     periods: splitList(fields.periods.value),
     materials: splitList(fields.materials.value),
     methods: splitList(fields.methods.value),
-    proxies: splitList(fields.proxies.value),
+    proxies: splitList(fields.proxies.value)
+  };
+}
+
+function notesPayload() {
+  return {
     readingStatus: fields.readingStatus.value,
     notesResearchQuestion: fields.notesResearchQuestion.value.trim(),
     notesRegion: fields.notesRegion.value.trim(),
@@ -736,6 +772,90 @@ function formPayload() {
     notesQuotePoints: fields.notesQuotePoints.value.trim(),
     notesPersonal: fields.notesPersonal.value.trim()
   };
+}
+
+function formPayload() {
+  return { ...metadataPayload(), ...notesPayload() };
+}
+
+async function reloadPapersAfterConflict() {
+  const message = "论文已在其他操作中更新，请检查后重试";
+  await loadPapers();
+  setPaperSaveState(message, "is-error");
+  setStatus(message);
+}
+
+async function savePaperMetadata() {
+  if (!state.selectedPaper) return;
+  setPaperSaveState("保存中", "is-saving");
+  try {
+    const paper = await api(`/api/papers/${state.selectedPaper.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ...metadataPayload(),
+        expectedVersion: state.selectedPaper.version
+      })
+    });
+    patchPaperInState(paper);
+    renderPapers();
+    fillFormFromPaper(paper);
+    setStatus("论文已保存");
+  } catch (error) {
+    if (error.status === 409) {
+      await reloadPapersAfterConflict();
+      return;
+    }
+    setPaperSaveState(error.message, "is-error");
+    setStatus(error.message);
+  }
+}
+
+async function savePaperNotes(requestId) {
+  if (requestId !== state.noteSaveRequestId || !state.selectedPaper || fields.draftId.value) return;
+  const paperId = state.selectedPaper.id;
+  const expectedVersion = state.selectedPaper.version;
+  setPaperSaveState("保存中", "is-saving");
+  try {
+    const paper = await api(`/api/papers/${state.selectedPaper.id}/notes`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...notesPayload(), expectedVersion })
+    });
+    if (state.selectedPaper?.id !== paperId) return;
+    if (requestId !== state.noteSaveRequestId) {
+      if (paper.version > state.selectedPaper.version) {
+        state.selectedPaper = { ...state.selectedPaper, version: paper.version };
+        state.papers = state.papers.map((entry) =>
+          entry.id === paperId ? { ...entry, version: paper.version } : entry
+        );
+      }
+      return;
+    }
+    patchPaperInState(paper);
+    renderPapers();
+    setPaperSaveState("已保存", "is-success");
+  } catch (error) {
+    if (requestId !== state.noteSaveRequestId) return;
+    if (error.status === 409) {
+      await reloadPapersAfterConflict();
+      return;
+    }
+    setPaperSaveState(error.message, "is-error");
+    setStatus(error.message);
+  }
+}
+
+function scheduleNoteAutosave() {
+  if (!state.selectedPaper || fields.draftId.value) return;
+  if (state.noteAutosaveTimer) clearTimeout(state.noteAutosaveTimer);
+  state.noteSaveRequestId += 1;
+  const requestId = state.noteSaveRequestId;
+  setPaperSaveState("有未保存笔记", "is-unsaved");
+  state.noteAutosaveTimer = setTimeout(() => {
+    state.noteAutosaveTimer = null;
+    void savePaperNotes(requestId);
+  }, NOTE_AUTOSAVE_DELAY_MS);
 }
 
 document.querySelector("#uploadForm").addEventListener("submit", async (event) => {
@@ -834,7 +954,10 @@ readerElements.viewer.addEventListener("scroll", updateCurrentPageFromScroll);
 document.querySelector("#detailForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const id = fields.draftId.value;
-  if (!id) return;
+  if (!id) {
+    await savePaperMetadata();
+    return;
+  }
   setStatus("正在确认入库");
   try {
     const paper = await api(`/api/drafts/${id}/confirm`, {
@@ -850,6 +973,11 @@ document.querySelector("#detailForm").addEventListener("submit", async (event) =
     setStatus(error.message);
   }
 });
+
+for (const key of noteFieldNames) {
+  fields[key].addEventListener("input", scheduleNoteAutosave);
+  fields[key].addEventListener("change", scheduleNoteAutosave);
+}
 
 document.querySelector("#searchButton").addEventListener("click", loadPapers);
 document.querySelector("#searchInput").addEventListener("keydown", (event) => {
