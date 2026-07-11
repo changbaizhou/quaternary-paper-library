@@ -1,52 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { spawn } from "node:child_process";
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  utimesSync,
-  writeFileSync
-} from "node:fs";
+import { mkdirSync, utimesSync } from "node:fs";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import properLockfile from "proper-lockfile";
 
-import * as database from "../src/database.js";
-
-const { initDb, openDb } = database;
+import { initDb, openDb } from "../src/database.js";
 
 function wait(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
-async function waitFor(predicate, timeoutMs = 5_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
-    if (Date.now() >= deadline) throw new Error("Timed out waiting for test condition");
-    await wait(10);
-  }
-}
-
-function lockPathFor(dbPath) {
-  return `${path.resolve(dbPath)}.init-lock`;
-}
-
-function writeExpiredLock(dbPath, { nonce, pid }) {
-  const lockPath = lockPathFor(dbPath);
-  mkdirSync(lockPath);
-  writeFileSync(path.join(lockPath, "owner.json"), JSON.stringify({
-    nonce,
-    pid,
-    leaseDurationMs: 100,
-    heartbeatIntervalMs: 25,
-    publishedAt: Date.now() - 1_000
-  }));
-  const heartbeatPath = path.join(lockPath, "heartbeat");
-  writeFileSync(heartbeatPath, "");
-  const expired = new Date(Date.now() - 1_000);
-  utimesSync(heartbeatPath, expired, expired);
 }
 
 function runInitProcess(dbPath, backupsDir) {
@@ -79,202 +43,66 @@ function runInitProcess(dbPath, backupsDir) {
   });
 }
 
-function runLockRaceProcess({ dbPath, readyDir, resultDir, goPath, releasePath, id }) {
-  const databaseModuleUrl = new URL("../src/database.js", import.meta.url).href;
-  const script = `
-    import { existsSync, writeFileSync } from "node:fs";
-    import path from "node:path";
-    import { acquireInitializationLock } from ${JSON.stringify(databaseModuleUrl)};
-    const sleep = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
-    try {
-      const release = acquireInitializationLock(process.env.QPL_TEST_DB_PATH, {
-        timeoutMs: 400,
-        leaseDurationMs: 1_000,
-        heartbeatIntervalMs: 50,
-        beforePublish() {
-          writeFileSync(path.join(process.env.QPL_TEST_READY_DIR, process.env.QPL_TEST_ID), "ready");
-          while (!existsSync(process.env.QPL_TEST_GO_PATH)) sleep();
-        }
-      });
-      writeFileSync(path.join(process.env.QPL_TEST_RESULT_DIR, process.env.QPL_TEST_ID), "acquired");
-      while (!existsSync(process.env.QPL_TEST_RELEASE_PATH)) sleep();
-      release();
-    } catch (error) {
-      const result = error.message.includes("Timed out") ? "timed-out" : "error: " + error.stack;
-      writeFileSync(path.join(process.env.QPL_TEST_RESULT_DIR, process.env.QPL_TEST_ID), result);
-      if (!error.message.includes("Timed out")) process.exitCode = 1;
-    }
-  `;
-
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["--input-type=module", "--eval", script], {
-      env: {
-        PATH: process.env.PATH,
-        SystemRoot: process.env.SystemRoot,
-        QPL_TEST_DB_PATH: dbPath,
-        QPL_TEST_READY_DIR: readyDir,
-        QPL_TEST_RESULT_DIR: resultDir,
-        QPL_TEST_GO_PATH: goPath,
-        QPL_TEST_RELEASE_PATH: releasePath,
-        QPL_TEST_ID: id
-      },
-      stdio: ["ignore", "ignore", "pipe"]
-    });
-    let stderr = "";
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-    });
-    child.on("error", reject);
-    child.on("exit", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`lock race child exited with code ${code}: ${stderr}`));
-    });
-  });
-}
-
-test("initialization lock publishes owner metadata atomically", async () => {
+test("initDb waits for an existing proper-lockfile lock", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-lock-"));
   const dbPath = path.join(dir, "library.sqlite");
+  const backupsDir = path.join(dir, "migration-backups");
   let release;
 
   try {
-    assert.equal(typeof database.acquireInitializationLock, "function");
-    let publicationInspected = false;
-    release = database.acquireInitializationLock(dbPath, {
-      beforePublish({ lockPath, temporaryLockPath, nonce }) {
-        publicationInspected = true;
-        assert.equal(existsSync(lockPath), false);
-        const owner = JSON.parse(readFileSync(path.join(temporaryLockPath, "owner.json"), "utf8"));
-        assert.equal(owner.nonce, nonce);
-        assert.ok(existsSync(path.join(temporaryLockPath, "heartbeat")));
-      }
+    const legacy = openDb(dbPath);
+    legacy.exec(`
+      CREATE TABLE drafts (id INTEGER PRIMARY KEY, stored_filename TEXT DEFAULT '', stored_path TEXT DEFAULT '');
+      CREATE TABLE papers (id INTEGER PRIMARY KEY, stored_filename TEXT DEFAULT '', stored_path TEXT DEFAULT '');
+    `);
+    legacy.close();
+
+    release = properLockfile.lockSync(dbPath, { realpath: false, stale: 10_000, update: 2_000 });
+    let completed = false;
+    const initialization = runInitProcess(dbPath, backupsDir).then(() => {
+      completed = true;
     });
 
-    assert.equal(publicationInspected, true);
-    assert.ok(existsSync(path.join(lockPathFor(dbPath), "owner.json")));
+    await wait(200);
+    assert.equal(completed, false);
+    release();
+    release = null;
+    await initialization;
+
+    const migrated = openDb(dbPath);
+    const versions = migrated.prepare("SELECT version FROM schema_migrations").all();
+    migrated.close();
+    assert.deepEqual(versions.map((item) => item.version), [1]);
   } finally {
     release?.();
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-test("initialization lock release preserves a lock with a different nonce", async () => {
+test("initDb reclaims a stale proper-lockfile lock", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-lock-"));
   const dbPath = path.join(dir, "library.sqlite");
 
   try {
-    const release = database.acquireInitializationLock(dbPath);
-    const ownerPath = path.join(lockPathFor(dbPath), "owner.json");
-    const owner = JSON.parse(readFileSync(ownerPath, "utf8"));
-    writeFileSync(ownerPath, JSON.stringify({ ...owner, nonce: "replacement-owner" }));
+    const legacy = openDb(dbPath);
+    legacy.exec(`
+      CREATE TABLE drafts (id INTEGER PRIMARY KEY, stored_filename TEXT DEFAULT '', stored_path TEXT DEFAULT '');
+      CREATE TABLE papers (id INTEGER PRIMARY KEY, stored_filename TEXT DEFAULT '', stored_path TEXT DEFAULT '');
+    `);
+    legacy.close();
 
-    assert.equal(release(), false);
-    assert.ok(existsSync(lockPathFor(dbPath)));
+    const lockPath = `${dbPath}.lock`;
+    mkdirSync(lockPath);
+    const staleTime = new Date(Date.now() - 20_000);
+    utimesSync(lockPath, staleTime, staleTime);
+
+    initDb(dbPath);
+
+    const migrated = openDb(dbPath);
+    const versions = migrated.prepare("SELECT version FROM schema_migrations").all();
+    migrated.close();
+    assert.deepEqual(versions.map((item) => item.version), [1]);
   } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test("competing atomic lock publications produce one owner and clean losing candidates", async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-lock-"));
-  const dbPath = path.join(dir, "library.sqlite");
-  const readyDir = path.join(dir, "ready");
-  const resultDir = path.join(dir, "results");
-  const goPath = path.join(dir, "go");
-  const releasePath = path.join(dir, "release");
-
-  try {
-    assert.equal(typeof database.acquireInitializationLock, "function");
-    mkdirSync(readyDir);
-    mkdirSync(resultDir);
-    const children = ["one", "two"].map((id) => runLockRaceProcess({
-      dbPath,
-      readyDir,
-      resultDir,
-      goPath,
-      releasePath,
-      id
-    }));
-
-    await waitFor(() => readdirSync(readyDir).length === 2);
-    writeFileSync(goPath, "go");
-    await waitFor(() => readdirSync(resultDir).length === 2);
-
-    const results = readdirSync(resultDir).map((name) => readFileSync(path.join(resultDir, name), "utf8")).sort();
-    assert.deepEqual(results, ["acquired", "timed-out"]);
-    assert.ok(existsSync(path.join(lockPathFor(dbPath), "owner.json")));
-    assert.equal(
-      readdirSync(dir).filter((name) => name.includes(".init-lock.tmp-")).length,
-      0
-    );
-
-    writeFileSync(releasePath, "release");
-    const settled = await Promise.allSettled(children);
-    assert.deepEqual(
-      settled.map((result) => result.status),
-      ["fulfilled", "fulfilled"],
-      settled.filter((result) => result.status === "rejected").map((result) => result.reason)
-    );
-  } finally {
-    writeFileSync(releasePath, "release");
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test("initialization lock reclaims an expired dead-owner lease", async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-lock-"));
-  const dbPath = path.join(dir, "library.sqlite");
-  let release;
-
-  try {
-    assert.equal(typeof database.acquireInitializationLock, "function");
-    writeExpiredLock(dbPath, { nonce: "expired-dead", pid: 2_147_483_647 });
-    release = database.acquireInitializationLock(dbPath, { timeoutMs: 500 });
-    const owner = JSON.parse(readFileSync(path.join(lockPathFor(dbPath), "owner.json"), "utf8"));
-    assert.notEqual(owner.nonce, "expired-dead");
-  } finally {
-    release?.();
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test("initialization lock reclaims an expired lease despite PID reuse", async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-lock-"));
-  const dbPath = path.join(dir, "library.sqlite");
-  let release;
-
-  try {
-    assert.equal(typeof database.acquireInitializationLock, "function");
-    writeExpiredLock(dbPath, { nonce: "expired-reused-pid", pid: process.pid });
-    release = database.acquireInitializationLock(dbPath, { timeoutMs: 500 });
-    const owner = JSON.parse(readFileSync(path.join(lockPathFor(dbPath), "owner.json"), "utf8"));
-    assert.notEqual(owner.nonce, "expired-reused-pid");
-  } finally {
-    release?.();
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test("initialization lock does not reclaim a live heartbeat lease", async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-lock-"));
-  const dbPath = path.join(dir, "library.sqlite");
-  let release;
-
-  try {
-    assert.equal(typeof database.acquireInitializationLock, "function");
-    release = database.acquireInitializationLock(dbPath, {
-      leaseDurationMs: 120,
-      heartbeatIntervalMs: 20
-    });
-    await wait(300);
-
-    assert.throws(
-      () => database.acquireInitializationLock(dbPath, { timeoutMs: 100 }),
-      /Timed out waiting for database initialization lock/
-    );
-  } finally {
-    release?.();
     await rm(dir, { recursive: true, force: true });
   }
 });
@@ -431,7 +259,7 @@ test("initDb snapshots and fully migrates pre-v1 file records exactly once", asy
   }
 });
 
-test("initDb rolls back all schema changes when migration version insertion fails", async () => {
+test("initDb rolls back migration failure, releases its lock, and retries", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-db-"));
   const dbPath = path.join(dir, "library.sqlite");
   const backupsDir = path.join(dir, "migration-backups");
@@ -542,6 +370,50 @@ test("initDb serializes concurrent initialization across processes", async () =>
 
     assert.equal(snapshots.length, 1);
     assert.deepEqual(versions.map((item) => item.version), [1]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("initDb remains serialized across repeated concurrent initialization rounds", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-db-stress-"));
+
+  try {
+    for (let round = 0; round < 5; round += 1) {
+      const dbPath = path.join(dir, `library-${round}.sqlite`);
+      const backupsDir = path.join(dir, `backups-${round}`);
+      const legacy = openDb(dbPath);
+      legacy.exec(`
+        CREATE TABLE drafts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          stored_filename TEXT NOT NULL DEFAULT '',
+          stored_path TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE papers (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          stored_filename TEXT NOT NULL DEFAULT '',
+          stored_path TEXT NOT NULL DEFAULT ''
+        );
+      `);
+      legacy.close();
+
+      const results = await Promise.allSettled(
+        Array.from({ length: 6 }, () => runInitProcess(dbPath, backupsDir))
+      );
+      assert.deepEqual(
+        results.map((result) => result.status),
+        Array(6).fill("fulfilled"),
+        results.filter((result) => result.status === "rejected").map((result) => result.reason)
+      );
+
+      const snapshots = (await readdir(backupsDir)).filter((name) => /^pre-migration-.*\.sqlite$/.test(name));
+      const migrated = openDb(dbPath);
+      const versions = migrated.prepare("SELECT version FROM schema_migrations").all();
+      migrated.close();
+
+      assert.equal(snapshots.length, 1);
+      assert.deepEqual(versions.map((item) => item.version), [1]);
+    }
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
