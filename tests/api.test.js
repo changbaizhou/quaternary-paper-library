@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 
 import { createApp } from "../src/server.js";
+import { PaperRepository } from "../src/repository.js";
 
 async function withServer(callback, overrides = {}) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-api-"));
@@ -19,7 +20,7 @@ async function withServer(callback, overrides = {}) {
   const baseUrl = `http://127.0.0.1:${port}`;
 
   try {
-    await callback(baseUrl);
+    await callback(baseUrl, { dbPath: path.join(dir, "library.sqlite"), dir, filesDir: path.join(dir, "files") });
   } finally {
     await new Promise((resolve) => server.close(resolve));
     await rm(dir, { recursive: true, force: true });
@@ -460,6 +461,42 @@ test("API purges every trashed paper only after full-bin confirmation", async ()
       extractPdfText: async () => "Full bin source paper\nAbstract\nA source file for full-bin purge tests."
     }
   );
+});
+
+test("API rejects symlink or junction traversal for reads and purge", async () => {
+  await withServer(async (baseUrl, { dbPath, dir, filesDir }) => {
+    const outsideDir = path.join(dir, "outside");
+    const linkedDir = path.join(filesDir, "linked");
+    const victimPath = path.join(outsideDir, "victim.pdf");
+    await mkdir(outsideDir, { recursive: true });
+    await symlink(outsideDir, linkedDir, process.platform === "win32" ? "junction" : "dir");
+    await writeFile(victimPath, "%PDF-1.4 outside victim");
+
+    const repo = new PaperRepository(dbPath);
+    const draftId = repo.createDraft({
+      storedPath: path.join(linkedDir, "victim.pdf"),
+      storedFilename: "victim.pdf",
+      title: "Linked victim paper",
+      classification: {},
+      confidence: {},
+      evidence: {}
+    });
+    const paperId = repo.confirmDraft(draftId);
+
+    assert.equal((await fetch(`${baseUrl}/api/papers/${paperId}/file`)).status, 404);
+    assert.equal((await fetch(`${baseUrl}/api/papers/${paperId}`, { method: "DELETE" })).status, 200);
+    const purgeResponse = await fetch(`${baseUrl}/api/trash/${paperId}`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ confirm: true })
+    });
+    assert.equal(purgeResponse.status, 200);
+    const purgeBody = await purgeResponse.json();
+    assert.deepEqual(purgeBody.cleanup.removed, []);
+    assert.equal(purgeBody.cleanup.rejected.length, 1);
+    assert.ok(!JSON.stringify(purgeBody).includes(filesDir));
+    await access(victimPath);
+  });
 });
 
 test("API saves reading progress and exposes it in paper list", async () => {

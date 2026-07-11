@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 
 import { initDb, openDb } from "../src/database.js";
+import { removeLibraryFiles } from "../src/fileStorage.js";
 import { PaperRepository } from "../src/repository.js";
 
 test("draft confirm and search workflow", async () => {
@@ -182,6 +183,80 @@ test("file storage removes only safe PDF paths", async () => {
     assert.equal(cleanup.missing.length, 1);
     assert.equal(cleanup.rejected.length, 2);
     assert.ok([...cleanup.rejected, ...cleanup.missing, ...cleanup.removed].every((value) => !path.isAbsolute(value)));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("file storage protects canonical aliases referenced by surviving papers", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-shared-"));
+  const filesDir = path.join(dir, "files");
+  const dbPath = path.join(dir, "library.sqlite");
+
+  try {
+    await mkdir(path.join(filesDir, "2026"), { recursive: true });
+    const pdfPath = path.join(filesDir, "2026", "shared.pdf");
+    await writeFile(pdfPath, "%PDF-1.4 shared");
+    initDb(dbPath);
+    const repo = new PaperRepository(dbPath);
+    const relativePath = path.relative(process.cwd(), pdfPath);
+    const dotPath = `${filesDir}${path.sep}2026${path.sep}.${path.sep}shared.pdf`;
+
+    const firstDraft = repo.createDraft({
+      storedPath: relativePath,
+      storedFilename: "shared.pdf",
+      title: "First shared paper",
+      classification: {},
+      confidence: {},
+      evidence: {}
+    });
+    const secondDraft = repo.createDraft({
+      storedPath: dotPath,
+      storedFilename: "shared.pdf",
+      title: "Second shared paper",
+      classification: {},
+      confidence: {},
+      evidence: {}
+    });
+    const casePath = `${filesDir}${path.sep}2026${path.sep}SHARED.PDF`;
+    let caseDraftId = null;
+    if (process.platform === "win32") {
+      caseDraftId = repo.createDraft({
+        storedPath: casePath,
+        storedFilename: "SHARED.PDF",
+        title: "Case alias paper",
+        classification: {},
+        confidence: {},
+        evidence: {}
+      });
+    }
+    const firstPaperId = repo.confirmDraft(firstDraft);
+    const secondPaperId = repo.confirmDraft(secondDraft);
+    const casePaperId = caseDraftId === null ? null : repo.confirmDraft(caseDraftId);
+
+    repo.trashPaper(firstPaperId);
+    const purgedFirst = repo.purgePaper(firstPaperId);
+    assert.ok(purgedFirst.storedPaths.includes(relativePath));
+    assert.ok(purgedFirst.protectedStoredPaths.includes(dotPath));
+    if (casePaperId !== null) assert.ok(purgedFirst.protectedStoredPaths.includes(casePath));
+    const firstCleanup = removeLibraryFiles(filesDir, purgedFirst.storedPaths, purgedFirst.protectedStoredPaths);
+    assert.deepEqual(firstCleanup.removed, []);
+    assert.ok(firstCleanup.rejected.length === 0);
+    await access(pdfPath);
+
+    repo.trashPaper(secondPaperId);
+    const purgedSecond = repo.purgePaper(secondPaperId);
+    const secondCleanup = removeLibraryFiles(filesDir, purgedSecond.storedPaths, purgedSecond.protectedStoredPaths);
+    if (casePaperId === null) {
+      assert.deepEqual(secondCleanup.removed, ["2026/shared.pdf"]);
+    } else {
+      assert.deepEqual(secondCleanup.removed, []);
+      repo.trashPaper(casePaperId);
+      const purgedCase = repo.purgePaper(casePaperId);
+      const caseCleanup = removeLibraryFiles(filesDir, purgedCase.storedPaths, purgedCase.protectedStoredPaths);
+      assert.deepEqual(caseCleanup.removed, ["2026/shared.pdf"]);
+    }
+    await assert.rejects(access(pdfPath));
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

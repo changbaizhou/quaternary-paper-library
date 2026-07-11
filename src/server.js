@@ -246,6 +246,11 @@ function appendCleanup(total, current) {
   }
 }
 
+function publicPurgedPaper(paper) {
+  const { storedPath, ...safePaper } = paper;
+  return safePaper;
+}
+
 export function createApp(options = {}) {
   const config = { ...defaultConfig, ...options };
   const enableUploadLookup = config.enableUploadLookup ?? true;
@@ -360,8 +365,12 @@ export function createApp(options = {}) {
     try {
       requirePurgeConfirmation(request.body || {});
       const purged = repo.purgePaper(Number(request.params.id));
-      const cleanup = removeLibraryFiles(config.filesDir, purged.storedPaths);
-      response.json({ paper: purged.paper, cleanup });
+      const cleanup = removeLibraryFiles(
+        config.filesDir,
+        purged.storedPaths,
+        purged.protectedStoredPaths
+      );
+      response.json({ paper: publicPurgedPaper(purged.paper), cleanup });
     } catch (error) {
       respondToPaperStateError(error, response, next);
     }
@@ -374,8 +383,11 @@ export function createApp(options = {}) {
       const purged = [];
       for (const paper of repo.listTrashedPapers()) {
         const result = repo.purgePaper(paper.id);
-        purged.push(result.paper);
-        appendCleanup(cleanup, removeLibraryFiles(config.filesDir, result.storedPaths));
+        purged.push(publicPurgedPaper(result.paper));
+        appendCleanup(
+          cleanup,
+          removeLibraryFiles(config.filesDir, result.storedPaths, result.protectedStoredPaths)
+        );
       }
       response.json({ papers: purged, cleanup });
     } catch (error) {

@@ -1,9 +1,47 @@
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, realpathSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 
+const realpathNative = realpathSync.native || realpathSync;
+
+function comparablePath(value) {
+  const normalized = path.resolve(value);
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
 function isInside(root, target) {
-  const relative = path.relative(root, target);
+  const comparableRoot = comparablePath(root);
+  const comparableTarget = comparablePath(target);
+  const relative = path.relative(comparableRoot, comparableTarget);
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function canonicalizeExistingPath(target) {
+  let current = target;
+  const missingParts = [];
+
+  while (!existsSync(current)) {
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    missingParts.unshift(path.basename(current));
+    current = parent;
+  }
+
+  let canonical;
+  try {
+    canonical = realpathNative(current);
+  } catch {
+    return null;
+  }
+  return missingParts.reduce((parent, part) => path.join(parent, part), canonical);
+}
+
+function resolveCandidate(filesRoot, canonicalRoot, candidate) {
+  if (!isInside(filesRoot, candidate)) return null;
+
+  const canonicalCandidate = canonicalizeExistingPath(candidate);
+  if (!canonicalCandidate || !isInside(canonicalRoot, canonicalCandidate)) return null;
+  if (existsSync(candidate) && !statSync(candidate).isFile()) return null;
+  return existsSync(candidate) ? canonicalCandidate : candidate;
 }
 
 function safeLabel(filesRoot, resolvedPath, storedPath) {
@@ -17,30 +55,40 @@ export function resolveLibraryPdf(filesDir, storedPath) {
   if (!storedPath) return null;
 
   const filesRoot = path.resolve(filesDir);
+  const canonicalRoot = canonicalizeExistingPath(filesRoot);
+  if (!canonicalRoot || !existsSync(filesRoot) || !statSync(filesRoot).isDirectory()) return null;
   const rawPath = String(storedPath);
   const candidates = path.isAbsolute(rawPath)
     ? [path.resolve(rawPath)]
     : [path.resolve(process.cwd(), rawPath), path.resolve(filesRoot, rawPath)];
 
   for (const candidate of candidates) {
-    if (isInside(filesRoot, candidate) && path.extname(candidate).toLowerCase() === ".pdf") {
-      return candidate;
+    if (path.extname(candidate).toLowerCase() !== ".pdf") continue;
+    const resolved = resolveCandidate(filesRoot, canonicalRoot, candidate);
+    if (resolved) {
+      return resolved;
     }
   }
 
   return null;
 }
 
-export function removeLibraryFiles(filesDir, storedPaths) {
+export function removeLibraryFiles(filesDir, storedPaths, protectedStoredPaths = []) {
   const filesRoot = path.resolve(filesDir);
   const removed = [];
   const rejected = [];
   const missing = [];
   const seen = new Set();
+  const protectedPaths = new Set();
+
+  for (const storedPath of protectedStoredPaths || []) {
+    const resolvedPath = resolveLibraryPdf(filesRoot, storedPath);
+    if (resolvedPath) protectedPaths.add(comparablePath(resolvedPath));
+  }
 
   for (const storedPath of storedPaths || []) {
     const resolvedPath = resolveLibraryPdf(filesRoot, storedPath);
-    const key = resolvedPath || `rejected:${String(storedPath)}`;
+    const key = resolvedPath ? comparablePath(resolvedPath) : `rejected:${String(storedPath)}`;
     if (seen.has(key)) continue;
     seen.add(key);
 
@@ -49,6 +97,7 @@ export function removeLibraryFiles(filesDir, storedPaths) {
       rejected.push(label);
       continue;
     }
+    if (protectedPaths.has(key)) continue;
 
     if (!existsSync(resolvedPath)) {
       missing.push(label);

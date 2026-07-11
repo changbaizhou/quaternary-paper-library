@@ -549,7 +549,7 @@ export class PaperRepository {
         db.prepare("DELETE FROM paper_files WHERE paper_id = ? OR draft_id = ?").run(id, paper.sourceDraftId);
         db.prepare("DELETE FROM papers WHERE id = ? AND deleted_at IS NOT NULL").run(id);
 
-        const referencedPaths = new Set([
+        const protectedStoredPaths = [
           ...db
             .prepare("SELECT stored_path FROM papers WHERE stored_path <> ''")
             .all()
@@ -558,11 +558,14 @@ export class PaperRepository {
             .prepare("SELECT stored_path FROM paper_files WHERE stored_path <> ''")
             .all()
             .map((row) => row.stored_path)
-        ]);
-        const safeStoredPaths = [...new Set(storedPaths)].filter((storedPath) => !referencedPaths.has(storedPath));
+        ];
 
         db.exec("COMMIT");
-        return { paper, storedPaths: safeStoredPaths };
+        return {
+          paper,
+          storedPaths: [...new Set(storedPaths)],
+          protectedStoredPaths: [...new Set(protectedStoredPaths)]
+        };
       } catch (error) {
         if (db.isTransaction) db.exec("ROLLBACK");
         throw error;
