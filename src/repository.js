@@ -186,10 +186,14 @@ function activePaperRows(db) {
 function paperHashMap(db) {
   const hashes = new Map();
   for (const row of db.prepare(`
-    SELECT paper_id, sha256
+    SELECT paper_files.paper_id, paper_files.sha256
     FROM paper_files
-    WHERE paper_id IS NOT NULL AND status = 'active' AND sha256 <> ''
-    ORDER BY id ASC
+    JOIN papers ON papers.id = paper_files.paper_id
+    WHERE paper_files.status = 'active'
+      AND paper_files.sha256 <> ''
+      AND papers.deleted_at IS NULL
+      AND papers.merged_into_id IS NULL
+    ORDER BY paper_files.id ASC
   `).all()) {
     if (!hashes.has(row.paper_id)) hashes.set(row.paper_id, new Set());
     hashes.get(row.paper_id).add(row.sha256);
@@ -247,7 +251,26 @@ function findDuplicateCandidates(db, input = {}) {
 }
 
 function duplicateGroups(db) {
-  const groups = { sha256: [], doi: [], title: [] };
+  const hashes = paperHashMap(db);
+  const papersByHash = new Map();
+  for (const [paperId, paperHashes] of hashes) {
+    for (const sha256 of paperHashes) {
+      if (!papersByHash.has(sha256)) papersByHash.set(sha256, new Set());
+      papersByHash.get(sha256).add(paperId);
+    }
+  }
+
+  const groups = {
+    sha256: [...papersByHash.entries()]
+      .filter(([, paperIds]) => paperIds.size > 1)
+      .map(([sha256, paperIds]) => ({
+        sha256,
+        paperIds: [...paperIds].sort((left, right) => left - right)
+      }))
+      .sort((left, right) => left.sha256 < right.sha256 ? -1 : left.sha256 > right.sha256 ? 1 : 0),
+    doi: [],
+    title: []
+  };
   for (const row of activePaperRows(db)) {
     for (const candidate of findDuplicateCandidates(db, {
       sha256: row.file_sha256,
@@ -256,7 +279,9 @@ function duplicateGroups(db) {
       year: row.year,
       excludePaperId: row.id
     })) {
-      groups[candidate.reason].push({ sourcePaperId: row.id, ...candidate });
+      if (candidate.reason !== "sha256") {
+        groups[candidate.reason].push({ sourcePaperId: row.id, ...candidate });
+      }
     }
   }
   return groups;

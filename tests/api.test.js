@@ -505,6 +505,42 @@ test("API abandons only confirmed pending draft deletions and cleans safe files"
   });
 });
 
+test("GET duplicates groups active secondary hashes into one deterministic group", async () => {
+  await withServer(async (baseUrl, { dbPath }) => {
+    const repo = new PaperRepository(dbPath);
+    const createPaper = (fileSha256, title) => repo.confirmDraft(repo.createDraft({
+      fileSha256,
+      title,
+      classification: {},
+      confidence: {},
+      evidence: {}
+    }));
+    const firstPaperId = createPaper("representative-first", "First paper");
+    const secondPaperId = createPaper("representative-second", "Second paper");
+
+    const db = openDb(dbPath);
+    try {
+      const insertFile = db.prepare(`
+        INSERT INTO paper_files (paper_id, stored_filename, stored_path, sha256, status)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+      insertFile.run(firstPaperId, "first-secondary.pdf", "2026/first-secondary.pdf", "shared-hash", "active");
+      insertFile.run(firstPaperId, "first-secondary-copy.pdf", "2026/first-secondary-copy.pdf", "shared-hash", "active");
+      insertFile.run(secondPaperId, "second-secondary.pdf", "2026/second-secondary.pdf", "shared-hash", "active");
+      insertFile.run(secondPaperId, "second-trash.pdf", "2026/second-trash.pdf", "shared-hash", "trash");
+    } finally {
+      db.close();
+    }
+
+    const response = await fetch(`${baseUrl}/api/duplicates`);
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.deepEqual(body.groups.sha256, [
+      { sha256: "shared-hash", paperIds: [firstPaperId, secondPaperId] }
+    ]);
+  });
+});
+
 test("API trashes, restores, and purges a paper with explicit confirmation", async () => {
   await withServer(
     async (baseUrl) => {

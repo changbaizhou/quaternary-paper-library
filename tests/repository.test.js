@@ -578,3 +578,50 @@ test("repository deletes only pending drafts and returns their cleanup paths", a
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("repository groups matching active secondary file hashes once", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-hash-groups-"));
+  const dbPath = path.join(dir, "library.sqlite");
+
+  try {
+    initDb(dbPath);
+    const repo = new PaperRepository(dbPath);
+    const createPaper = (fileSha256, title) => repo.confirmDraft(repo.createDraft({
+      fileSha256,
+      title,
+      classification: {},
+      confidence: {},
+      evidence: {}
+    }));
+    const firstPaperId = createPaper("representative-first", "First paper");
+    const secondPaperId = createPaper("representative-second", "Second paper");
+    const thirdPaperId = createPaper("representative-third", "Third paper");
+
+    const db = openDb(dbPath);
+    try {
+      const insertFile = db.prepare(`
+        INSERT INTO paper_files (paper_id, stored_filename, stored_path, sha256, status)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+      insertFile.run(firstPaperId, "first-secondary.pdf", "2026/first-secondary.pdf", "shared-hash", "active");
+      insertFile.run(firstPaperId, "first-secondary-copy.pdf", "2026/first-secondary-copy.pdf", "shared-hash", "active");
+      insertFile.run(secondPaperId, "second-secondary.pdf", "2026/second-secondary.pdf", "shared-hash", "active");
+      insertFile.run(thirdPaperId, "third-trash.pdf", "2026/third-trash.pdf", "shared-hash", "trash");
+      insertFile.run(thirdPaperId, "third-secondary.pdf", "2026/third-secondary.pdf", "another-hash", "active");
+      insertFile.run(firstPaperId, "first-other-secondary.pdf", "2026/first-other-secondary.pdf", "another-hash", "active");
+    } finally {
+      db.close();
+    }
+
+    assert.deepEqual(
+      repo.findDuplicatePapers({ sha256: "shared-hash" }).map((candidate) => candidate.paperId),
+      [firstPaperId, secondPaperId]
+    );
+    assert.deepEqual(repo.listDuplicateGroups().sha256, [
+      { sha256: "another-hash", paperIds: [firstPaperId, thirdPaperId] },
+      { sha256: "shared-hash", paperIds: [firstPaperId, secondPaperId] }
+    ]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
