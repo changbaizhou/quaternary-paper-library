@@ -223,7 +223,7 @@ test("409 recovery loads an unfiltered paper snapshot before refreshing the list
 
 test("failed reading progress is requeued with newer pending values winning", async () => {
   const script = await readFile("public/app.js", "utf8");
-  const helper = script.match(/function requeueReadingProgress\([\s\S]*?\n}\n/);
+  const helper = script.match(/function requeueReadingProgress\([\s\S]*?\r?\n}\r?\n/);
 
   assert.ok(helper, "reading progress requeue helper is required");
   const context = {};
