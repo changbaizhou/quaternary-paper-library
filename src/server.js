@@ -86,6 +86,10 @@ function updatePaperResponse(repo, request, response, allowedFields) {
       response.status(409).json({ error: error.message });
       return;
     }
+    if (error instanceof PaperStateError) {
+      response.status(409).json({ error: error.message });
+      return;
+    }
     if (error instanceof TypeError) {
       response.status(400).json({ error: error.message });
       return;
@@ -229,7 +233,11 @@ function respondToPaperStateError(error, response, next) {
     response.status(404).json({ error: error.message });
     return;
   }
-  if (error instanceof PaperStateError || error instanceof TypeError) {
+  if (error instanceof PaperStateError) {
+    response.status(409).json({ error: error.message });
+    return;
+  }
+  if (error instanceof TypeError) {
     response.status(400).json({ error: error.message });
     return;
   }
@@ -237,13 +245,14 @@ function respondToPaperStateError(error, response, next) {
 }
 
 function emptyCleanup() {
-  return { removed: [], rejected: [], missing: [] };
+  return { removed: [], rejected: [], missing: [], failed: [], failedCount: 0 };
 }
 
 function appendCleanup(total, current) {
-  for (const key of ["removed", "rejected", "missing"]) {
+  for (const key of ["removed", "rejected", "missing", "failed"]) {
     total[key].push(...current[key]);
   }
+  total.failedCount += current.failedCount;
 }
 
 function publicPaper(paper) {
@@ -386,16 +395,12 @@ export function createApp(options = {}) {
     try {
       requirePurgeConfirmation(request.body || {});
       const cleanup = emptyCleanup();
-      const purged = [];
-      for (const paper of repo.listTrashedPapers()) {
-        const result = repo.purgePaper(paper.id);
-        purged.push(publicPaper(result.paper));
-        appendCleanup(
-          cleanup,
-          removeLibraryFiles(config.filesDir, result.storedPaths, result.protectedStoredPaths)
-        );
-      }
-      response.json({ papers: purged, cleanup });
+      const result = repo.purgeAllTrashedPapers();
+      appendCleanup(
+        cleanup,
+        removeLibraryFiles(config.filesDir, result.storedPaths, result.protectedStoredPaths)
+      );
+      response.json({ papers: result.papers.map(publicPaper), cleanup });
     } catch (error) {
       respondToPaperStateError(error, response, next);
     }
@@ -428,6 +433,10 @@ export function createApp(options = {}) {
     } catch (error) {
       if (error instanceof RangeError) {
         response.status(400).json({ error: error.message });
+        return;
+      }
+      if (error instanceof PaperStateError) {
+        response.status(409).json({ error: error.message });
         return;
       }
       next(error);

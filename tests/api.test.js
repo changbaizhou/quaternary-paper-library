@@ -5,6 +5,7 @@ import path from "node:path";
 import os from "node:os";
 
 import { createApp } from "../src/server.js";
+import { openDb } from "../src/database.js";
 import { PaperRepository } from "../src/repository.js";
 
 async function withServer(callback, overrides = {}) {
@@ -582,6 +583,66 @@ test("Task 4 responses omit absolute and internal paper storage fields", async (
     assert.deepEqual(Object.keys(fullPurgeBody.papers[0]).sort(), publicKeys);
     assert.equal(fullPurgeBody.papers[0].status, "trash");
     assert.equal(JSON.stringify(fullPurgeBody).includes(absoluteStoredPath), false);
+  });
+});
+
+test("API returns 409 when editing trashed or merged papers", async () => {
+  await withServer(async (baseUrl, { dbPath }) => {
+    const repo = new PaperRepository(dbPath);
+    const createPaper = (title) => {
+      const draftId = repo.createDraft({ title, classification: {}, confidence: {}, evidence: {} });
+      return repo.confirmDraft(draftId);
+    };
+    const trashedId = createPaper("Trashed API paper");
+    assert.equal((await fetch(`${baseUrl}/api/papers/${trashedId}`, { method: "DELETE" })).status, 200);
+
+    const trashedEdit = await fetch(`${baseUrl}/api/papers/${trashedId}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expectedVersion: 2, title: "Blocked" })
+    });
+    assert.equal(trashedEdit.status, 409);
+    assert.match((await trashedEdit.json()).error, /active before editing/);
+
+    const trashedProgress = await fetch(`${baseUrl}/api/papers/${trashedId}/reading-progress`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ lastReadPage: 2 })
+    });
+    assert.equal(trashedProgress.status, 409);
+    assert.match((await trashedProgress.json()).error, /active before updating reading progress/);
+
+    const mergedId = createPaper("Merged API paper");
+    const db = openDb(dbPath);
+    try {
+      db.prepare("UPDATE papers SET deleted_at = CURRENT_TIMESTAMP, merged_into_id = 999 WHERE id = ?").run(mergedId);
+    } finally {
+      db.close();
+    }
+
+    const mergedEdit = await fetch(`${baseUrl}/api/papers/${mergedId}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expectedVersion: 1, title: "Blocked merged edit" })
+    });
+    assert.equal(mergedEdit.status, 409);
+    assert.match((await mergedEdit.json()).error, /active before editing/);
+
+    const mergedPurge = await fetch(`${baseUrl}/api/trash/${mergedId}`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ confirm: true })
+    });
+    assert.equal(mergedPurge.status, 409);
+    assert.match((await mergedPurge.json()).error, /cannot be purged/);
+
+    const mergedFullPurge = await fetch(`${baseUrl}/api/trash`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ confirm: true })
+    });
+    assert.equal(mergedFullPurge.status, 409);
+    assert.match((await mergedFullPurge.json()).error, /cannot be purged/);
   });
 });
 

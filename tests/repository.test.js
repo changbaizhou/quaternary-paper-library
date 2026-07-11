@@ -157,6 +157,165 @@ test("repository moves papers through trash, restore, and purge", async () => {
   }
 });
 
+test("repository purges all trashed papers in one operation", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-repo-"));
+  const dbPath = path.join(dir, "library.sqlite");
+
+  try {
+    initDb(dbPath);
+    const repo = new PaperRepository(dbPath);
+    const makePaper = (title, storedPath) => {
+      const draftId = repo.createDraft({
+        title,
+        storedPath,
+        classification: {},
+        confidence: {},
+        evidence: {}
+      });
+      return repo.confirmDraft(draftId);
+    };
+    const firstId = makePaper("First trashed paper", "2026/first.pdf");
+    const secondId = makePaper("Second trashed paper", "2026/second.pdf");
+    repo.trashPaper(firstId);
+    repo.trashPaper(secondId);
+
+    const purged = repo.purgeAllTrashedPapers();
+    assert.deepEqual(purged.papers.map((paper) => paper.id).sort(), [firstId, secondId].sort());
+    assert.deepEqual(purged.storedPaths.sort(), ["2026/first.pdf", "2026/second.pdf"]);
+    assert.deepEqual(purged.protectedStoredPaths, []);
+    assert.equal(repo.getPaper(firstId), null);
+    assert.equal(repo.getPaper(secondId), null);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("repository rejects merged records from purge and editing", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-repo-"));
+  const dbPath = path.join(dir, "library.sqlite");
+
+  try {
+    initDb(dbPath);
+    const repo = new PaperRepository(dbPath);
+    const draftId = repo.createDraft({ title: "Merged paper", classification: {}, confidence: {}, evidence: {} });
+    const paperId = repo.confirmDraft(draftId);
+    const db = openDb(dbPath);
+    try {
+      db.prepare("UPDATE papers SET deleted_at = CURRENT_TIMESTAMP, merged_into_id = 999 WHERE id = ?").run(paperId);
+    } finally {
+      db.close();
+    }
+
+    assert.throws(() => repo.purgePaper(paperId), /Merged paper cannot be purged/);
+    assert.throws(() => repo.purgeAllTrashedPapers(), /Merged paper cannot be purged/);
+    assert.throws(
+      () => repo.updatePaper(paperId, { expectedVersion: 1, title: "Blocked merged edit" }),
+      /Paper must be active before editing/
+    );
+    assert.throws(
+      () => repo.updateReadingProgress(paperId, { lastReadPage: 2 }),
+      /Paper must be active before updating reading progress/
+    );
+    assert.equal(repo.getPaper(paperId).title, "Merged paper");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("repository rejects edits while a paper is trashed until restore", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-repo-"));
+  const dbPath = path.join(dir, "library.sqlite");
+
+  try {
+    initDb(dbPath);
+    const repo = new PaperRepository(dbPath);
+    const draftId = repo.createDraft({ title: "Trashed paper", classification: {}, confidence: {}, evidence: {} });
+    const paperId = repo.confirmDraft(draftId);
+    repo.trashPaper(paperId);
+
+    assert.throws(
+      () => repo.updatePaper(paperId, { expectedVersion: 2, title: "Blocked trashed edit" }),
+      /Paper must be active before editing/
+    );
+    assert.throws(
+      () => repo.updateReadingProgress(paperId, { lastReadPage: 2 }),
+      /Paper must be active before updating reading progress/
+    );
+
+    repo.restorePaper(paperId);
+    assert.equal(repo.updatePaper(paperId, { expectedVersion: 3, title: "Restored edit" }).title, "Restored edit");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("repository rolls back createDraft when paper file attachment fails", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-repo-"));
+  const dbPath = path.join(dir, "library.sqlite");
+
+  try {
+    initDb(dbPath);
+    const db = openDb(dbPath);
+    try {
+      db.exec(`
+        CREATE TRIGGER reject_draft_file BEFORE INSERT ON paper_files
+        WHEN NEW.draft_id IS NOT NULL
+        BEGIN SELECT RAISE(ABORT, 'injected draft file failure'); END;
+      `);
+    } finally {
+      db.close();
+    }
+
+    const repo = new PaperRepository(dbPath);
+    assert.throws(
+      () => repo.createDraft({ title: "Atomic draft", storedPath: "2026/atomic.pdf" }),
+      /injected draft file failure/
+    );
+    const afterFailure = openDb(dbPath);
+    try {
+      assert.equal(afterFailure.prepare("SELECT COUNT(*) AS count FROM drafts").get().count, 0);
+      assert.equal(afterFailure.prepare("SELECT COUNT(*) AS count FROM paper_files").get().count, 0);
+    } finally {
+      afterFailure.close();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("repository rolls back confirmDraft when paper file attachment fails", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-repo-"));
+  const dbPath = path.join(dir, "library.sqlite");
+
+  try {
+    initDb(dbPath);
+    const repo = new PaperRepository(dbPath);
+    const draftId = repo.createDraft({ title: "Atomic confirmation", storedPath: "2026/atomic.pdf" });
+    const db = openDb(dbPath);
+    try {
+      db.exec(`
+        CREATE TRIGGER reject_paper_file BEFORE UPDATE OF paper_id ON paper_files
+        WHEN NEW.paper_id IS NOT NULL
+        BEGIN SELECT RAISE(ABORT, 'injected paper file failure'); END;
+      `);
+    } finally {
+      db.close();
+    }
+
+    assert.throws(() => repo.confirmDraft(draftId), /injected paper file failure/);
+    const afterFailure = openDb(dbPath);
+    try {
+      assert.equal(afterFailure.prepare("SELECT COUNT(*) AS count FROM papers").get().count, 0);
+      assert.equal(afterFailure.prepare("SELECT status FROM drafts WHERE id = ?").get(draftId).status, "pending");
+      assert.equal(afterFailure.prepare("SELECT COUNT(*) AS count FROM paper_files WHERE draft_id = ?").get(draftId).count, 1);
+    } finally {
+      afterFailure.close();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("file storage removes only safe PDF paths", async () => {
   const { removeLibraryFiles, resolveLibraryPdf } = await import("../src/fileStorage.js");
   const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-files-"));
@@ -183,6 +342,37 @@ test("file storage removes only safe PDF paths", async () => {
     assert.equal(cleanup.missing.length, 1);
     assert.equal(cleanup.rejected.length, 2);
     assert.ok([...cleanup.rejected, ...cleanup.missing, ...cleanup.removed].every((value) => !path.isAbsolute(value)));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("file storage reports rm failures without deleting the orphan", async () => {
+  const { removeLibraryFiles } = await import("../src/fileStorage.js");
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-files-"));
+
+  try {
+    await mkdir(path.join(dir, "2026"), { recursive: true });
+    const pdfPath = path.join(dir, "2026", "locked.pdf");
+    await writeFile(pdfPath, "%PDF-1.4");
+    const cleanup = removeLibraryFiles(
+      dir,
+      ["2026/locked.pdf"],
+      [],
+      {
+        removeFile: () => {
+          const error = new Error(`EACCES ${pdfPath}`);
+          error.code = "EACCES";
+          throw error;
+        }
+      }
+    );
+
+    assert.deepEqual(cleanup.removed, []);
+    assert.deepEqual(cleanup.failed, ["2026/locked.pdf"]);
+    assert.equal(cleanup.failedCount, 1);
+    assert.equal(JSON.stringify(cleanup).includes(dir), false);
+    await access(pdfPath);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

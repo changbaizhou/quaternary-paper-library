@@ -73,11 +73,17 @@ export function resolveLibraryPdf(filesDir, storedPath) {
   return null;
 }
 
-export function removeLibraryFiles(filesDir, storedPaths, protectedStoredPaths = []) {
+export function removeLibraryFiles(
+  filesDir,
+  storedPaths,
+  protectedStoredPaths = [],
+  { removeFile = rmSync } = {}
+) {
   const filesRoot = path.resolve(filesDir);
   const removed = [];
   const rejected = [];
   const missing = [];
+  const failed = [];
   const seen = new Set();
   const protectedPaths = new Set();
 
@@ -101,13 +107,21 @@ export function removeLibraryFiles(filesDir, storedPaths, protectedStoredPaths =
 
     if (!existsSync(resolvedPath)) {
       missing.push(label);
-      rmSync(resolvedPath, { force: true });
+      try {
+        removeFile(resolvedPath, { force: true });
+      } catch {
+        failed.push(label);
+      }
       continue;
     }
 
-    rmSync(resolvedPath, { force: true });
-    removed.push(label);
+    try {
+      removeFile(resolvedPath, { force: true });
+      removed.push(label);
+    } catch {
+      failed.push(label);
+    }
   }
 
-  return { removed, rejected, missing };
+  return { removed, rejected, missing, failed, failedCount: failed.length };
 }

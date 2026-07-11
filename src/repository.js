@@ -148,6 +148,7 @@ export class PaperStateError extends Error {
   constructor(message) {
     super(message);
     this.name = "PaperStateError";
+    this.status = 409;
   }
 }
 
@@ -209,40 +210,47 @@ export class PaperRepository {
 
   createDraft(input) {
     return this.withDb((db) => {
-      const stmt = db.prepare(`
-        INSERT INTO drafts (
-          original_filename, stored_filename, stored_path, doi, title, authors_json,
-          journal, year, abstract, author_keywords_json, suggested_keywords_json,
-          classification_json, confidence_json, evidence_json, file_sha256,
-          duplicate_candidates_json, extracted_text
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-      const result = stmt.run(
-        input.originalFilename || "",
-        input.storedFilename || "",
-        input.storedPath || "",
-        input.doi || "",
-        input.title || "",
-        toJson(input.authors, []),
-        input.journal || "",
-        input.year || null,
-        input.abstract || "",
-        toJson(input.authorKeywords, []),
-        toJson(input.suggestedKeywords, []),
-        toJson(input.classification, {}),
-        toJson(input.confidence, {}),
-        toJson(input.evidence, {}),
-        input.fileSha256 || "",
-        toJson(input.duplicateCandidates, []),
-        input.extractedText || ""
-      );
-      if (input.storedPath) {
-        db.prepare(`
-          INSERT INTO paper_files (draft_id, stored_filename, stored_path, sha256)
-          VALUES (?, ?, ?, ?)
-        `).run(Number(result.lastInsertRowid), input.storedFilename || "", input.storedPath, input.fileSha256 || "");
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const stmt = db.prepare(`
+          INSERT INTO drafts (
+            original_filename, stored_filename, stored_path, doi, title, authors_json,
+            journal, year, abstract, author_keywords_json, suggested_keywords_json,
+            classification_json, confidence_json, evidence_json, file_sha256,
+            duplicate_candidates_json, extracted_text
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        const result = stmt.run(
+          input.originalFilename || "",
+          input.storedFilename || "",
+          input.storedPath || "",
+          input.doi || "",
+          input.title || "",
+          toJson(input.authors, []),
+          input.journal || "",
+          input.year || null,
+          input.abstract || "",
+          toJson(input.authorKeywords, []),
+          toJson(input.suggestedKeywords, []),
+          toJson(input.classification, {}),
+          toJson(input.confidence, {}),
+          toJson(input.evidence, {}),
+          input.fileSha256 || "",
+          toJson(input.duplicateCandidates, []),
+          input.extractedText || ""
+        );
+        if (input.storedPath) {
+          db.prepare(`
+            INSERT INTO paper_files (draft_id, stored_filename, stored_path, sha256)
+            VALUES (?, ?, ?, ?)
+          `).run(Number(result.lastInsertRowid), input.storedFilename || "", input.storedPath, input.fileSha256 || "");
+        }
+        db.exec("COMMIT");
+        return Number(result.lastInsertRowid);
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
       }
-      return Number(result.lastInsertRowid);
     });
   }
 
@@ -261,8 +269,10 @@ export class PaperRepository {
 
   confirmDraft(id, overrides = {}) {
     return this.withDb((db) => {
-      const draft = mapDraft(db.prepare("SELECT * FROM drafts WHERE id = ?").get(id));
-      if (!draft) throw new Error(`Draft ${id} not found`);
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const draft = mapDraft(db.prepare("SELECT * FROM drafts WHERE id = ?").get(id));
+        if (!draft) throw new Error(`Draft ${id} not found`);
 
       const classification = {
         themes: overrides.themes ?? draft.classification.themes ?? [],
@@ -366,8 +376,13 @@ export class PaperRepository {
         `).run(Number(result.lastInsertRowid), paper.storedFilename, paper.storedPath, paper.fileSha256);
       }
 
-      db.prepare("UPDATE drafts SET status = 'confirmed' WHERE id = ?").run(id);
-      return Number(result.lastInsertRowid);
+        db.prepare("UPDATE drafts SET status = 'confirmed' WHERE id = ?").run(id);
+        db.exec("COMMIT");
+        return Number(result.lastInsertRowid);
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
     });
   }
 
@@ -383,6 +398,9 @@ export class PaperRepository {
         if (!current) {
           db.exec("ROLLBACK");
           return null;
+        }
+        if (current.deletedAt !== null || current.mergedIntoId !== null) {
+          throw new PaperStateError("Paper must be active before editing");
         }
         if (changes.expectedVersion !== current.version) {
           throw new VersionConflictError(changes.expectedVersion, current.version);
@@ -430,8 +448,11 @@ export class PaperRepository {
 
   updateReadingProgress(id, progress = {}) {
     return this.withDb((db) => {
-      const existing = db.prepare("SELECT id FROM papers WHERE id = ?").get(id);
+      const existing = db.prepare("SELECT * FROM papers WHERE id = ?").get(id);
       if (!existing) return null;
+      if (existing.deleted_at !== null || existing.merged_into_id !== null) {
+        throw new PaperStateError("Paper must be active before updating reading progress");
+      }
 
       const assignments = [];
       const values = [];
@@ -533,6 +554,9 @@ export class PaperRepository {
       try {
         const current = db.prepare("SELECT * FROM papers WHERE id = ?").get(id);
         if (!current) throw new PaperNotFoundError();
+        if (current.merged_into_id !== null) {
+          throw new PaperStateError("Merged paper cannot be purged");
+        }
         if (current.deleted_at === null) {
           throw new PaperStateError("Paper must be in trash before purge");
         }
@@ -564,6 +588,58 @@ export class PaperRepository {
         return {
           paper,
           storedPaths: [...new Set(storedPaths)],
+          protectedStoredPaths: [...new Set(protectedStoredPaths)]
+        };
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    });
+  }
+
+  purgeAllTrashedPapers() {
+    return this.withDb((db) => {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const rows = db
+          .prepare("SELECT * FROM papers WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC, id DESC")
+          .all();
+        if (rows.some((row) => row.merged_into_id !== null)) {
+          throw new PaperStateError("Merged paper cannot be purged");
+        }
+
+        const papers = rows.map(mapPaper);
+        const storedPaths = [];
+        for (const paper of papers) {
+          storedPaths.push(
+            ...db
+              .prepare("SELECT stored_path FROM paper_files WHERE paper_id = ? AND stored_path <> ''")
+              .all(paper.id)
+              .map((row) => row.stored_path),
+            paper.storedPath
+          );
+        }
+
+        for (const paper of papers) {
+          db.prepare("DELETE FROM paper_files WHERE paper_id = ? OR draft_id = ?").run(paper.id, paper.sourceDraftId);
+        }
+        db.prepare("DELETE FROM papers WHERE deleted_at IS NOT NULL AND merged_into_id IS NULL").run();
+
+        const protectedStoredPaths = [
+          ...db
+            .prepare("SELECT stored_path FROM papers WHERE stored_path <> ''")
+            .all()
+            .map((row) => row.stored_path),
+          ...db
+            .prepare("SELECT stored_path FROM paper_files WHERE stored_path <> ''")
+            .all()
+            .map((row) => row.stored_path)
+        ];
+
+        db.exec("COMMIT");
+        return {
+          papers,
+          storedPaths: [...new Set(storedPaths.filter(Boolean))],
           protectedStoredPaths: [...new Set(protectedStoredPaths)]
         };
       } catch (error) {
