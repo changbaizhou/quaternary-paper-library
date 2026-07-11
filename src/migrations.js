@@ -10,10 +10,72 @@ function ensureColumn(db, tableName, columnName, definition) {
   db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
 }
 
+function ensureBaseSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS drafts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      original_filename TEXT NOT NULL DEFAULT '',
+      stored_filename TEXT NOT NULL DEFAULT '',
+      stored_path TEXT NOT NULL DEFAULT '',
+      doi TEXT NOT NULL DEFAULT '',
+      title TEXT NOT NULL DEFAULT '',
+      authors_json TEXT NOT NULL DEFAULT '[]',
+      journal TEXT NOT NULL DEFAULT '',
+      year INTEGER,
+      abstract TEXT NOT NULL DEFAULT '',
+      author_keywords_json TEXT NOT NULL DEFAULT '[]',
+      suggested_keywords_json TEXT NOT NULL DEFAULT '[]',
+      classification_json TEXT NOT NULL DEFAULT '{}',
+      confidence_json TEXT NOT NULL DEFAULT '{}',
+      evidence_json TEXT NOT NULL DEFAULT '{}',
+      extracted_text TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS papers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_draft_id INTEGER,
+      stored_filename TEXT NOT NULL DEFAULT '',
+      stored_path TEXT NOT NULL DEFAULT '',
+      doi TEXT NOT NULL DEFAULT '',
+      title TEXT NOT NULL DEFAULT '',
+      authors_json TEXT NOT NULL DEFAULT '[]',
+      journal TEXT NOT NULL DEFAULT '',
+      year INTEGER,
+      abstract TEXT NOT NULL DEFAULT '',
+      keywords_json TEXT NOT NULL DEFAULT '[]',
+      themes_json TEXT NOT NULL DEFAULT '[]',
+      regions_json TEXT NOT NULL DEFAULT '[]',
+      periods_json TEXT NOT NULL DEFAULT '[]',
+      materials_json TEXT NOT NULL DEFAULT '[]',
+      methods_json TEXT NOT NULL DEFAULT '[]',
+      proxies_json TEXT NOT NULL DEFAULT '[]',
+      reading_status TEXT NOT NULL DEFAULT 'to-read',
+      notes_research_question TEXT NOT NULL DEFAULT '',
+      notes_region TEXT NOT NULL DEFAULT '',
+      notes_materials_methods TEXT NOT NULL DEFAULT '',
+      notes_chronology TEXT NOT NULL DEFAULT '',
+      notes_core_findings TEXT NOT NULL DEFAULT '',
+      notes_limits TEXT NOT NULL DEFAULT '',
+      notes_quote_points TEXT NOT NULL DEFAULT '',
+      notes_personal TEXT NOT NULL DEFAULT '',
+      bookmark_page INTEGER,
+      last_read_page INTEGER,
+      search_text TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+  ensureColumn(db, "papers", "bookmark_page", "INTEGER");
+  ensureColumn(db, "papers", "last_read_page", "INTEGER");
+}
+
 const migrations = [
   {
     version: 1,
     up(db) {
+      ensureBaseSchema(db);
       ensureColumn(db, "drafts", "file_sha256", "TEXT NOT NULL DEFAULT ''");
       ensureColumn(db, "drafts", "duplicate_candidates_json", "TEXT NOT NULL DEFAULT '[]'");
       ensureColumn(db, "papers", "normalized_doi", "TEXT NOT NULL DEFAULT ''");
@@ -83,19 +145,23 @@ export function hasPendingMigrations(db) {
 }
 
 export function runMigrations(db) {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS schema_migrations (
-      version INTEGER PRIMARY KEY,
-      applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-
-  const applied = appliedVersions(db);
   for (const migration of migrations) {
-    if (applied.has(migration.version)) continue;
-
     db.exec("BEGIN IMMEDIATE");
     try {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+          version INTEGER PRIMARY KEY,
+          applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+      const alreadyApplied = db.prepare(
+        "SELECT 1 FROM schema_migrations WHERE version = ?"
+      ).get(migration.version);
+      if (alreadyApplied) {
+        db.exec("COMMIT");
+        continue;
+      }
+
       migration.up(db);
       db.prepare("INSERT INTO schema_migrations (version) VALUES (?)").run(migration.version);
       db.exec("COMMIT");
