@@ -1,12 +1,19 @@
 import express from "express";
 import multer from "multer";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { defaultConfig } from "./config.js";
+import {
+  BackupValidationError,
+  createDatabaseBackup,
+  createFullBackup,
+  restoreBackup,
+  validateBackup
+} from "./backups.js";
 import { initDb } from "./database.js";
 import { exportBibtex, exportCsv, exportMarkdown } from "./exporters.js";
 import { lookupDoiMetadata, lookupTitleMetadata } from "./metadata.js";
@@ -363,14 +370,81 @@ function compensateUpload(repo, filesDir, draftIds, writtenPaths) {
   }
 }
 
+function pathInside(root, candidate) {
+  const lexicalRelative = path.relative(path.resolve(root), path.resolve(candidate));
+  if (lexicalRelative !== "" && (lexicalRelative.startsWith(`..${path.sep}`) || lexicalRelative === ".." || path.isAbsolute(lexicalRelative))) {
+    return false;
+  }
+  try {
+    const relative = path.relative(realpathSync(root), realpathSync(candidate));
+    return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+  } catch {
+    return false;
+  }
+}
+
+function publicBackup(record) {
+  return {
+    id: record.id,
+    backupType: record.backupType,
+    createdAt: record.createdAt,
+    sizeBytes: record.sizeBytes
+  };
+}
+
+function createAndRecordBackup(repo, config, type, reason, now) {
+  const backup = type === "full"
+    ? createFullBackup({ dbPath: config.dbPath, filesDir: config.filesDir, backupsDir: config.backupsDir, reason, now })
+    : createDatabaseBackup({ dbPath: config.dbPath, backupsDir: config.backupsDir, reason, now });
+  return repo.createBackupRecord(backup);
+}
+
+function pruneAutomaticBackups(repo, backupsDir) {
+  const automatic = repo
+    .listBackupRecords()
+    .filter((record) => record.backupType === "automatic")
+    .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt) || right.id - left.id);
+  for (const record of automatic.slice(30)) {
+    if (pathInside(backupsDir, record.storedPath)) {
+      rmSync(record.storedPath, { recursive: true, force: true });
+      repo.deleteBackupRecord(record.id);
+    }
+  }
+}
+
+function scheduleAutomaticBackup(repo, config, now) {
+  const nowDate = new Date(typeof now === "function" ? now() : now);
+  const newest = repo
+    .listBackupRecords()
+    .filter((record) => record.backupType === "automatic")
+    .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt) || right.id - left.id)[0];
+  const newestTime = newest ? Date.parse(newest.createdAt) : NaN;
+  if (!newest || Number.isNaN(newestTime) || nowDate.getTime() - newestTime >= 24 * 60 * 60 * 1000) {
+    const backup = createDatabaseBackup({
+      dbPath: config.dbPath,
+      backupsDir: config.backupsDir,
+      reason: "automatic",
+      now
+    });
+    repo.createBackupRecord({ ...backup, backupType: "automatic" });
+  }
+  pruneAutomaticBackups(repo, config.backupsDir);
+}
+
 export function createApp(options = {}) {
-  const config = { ...defaultConfig, ...options };
+  const configured = { ...defaultConfig, ...options };
+  const config = {
+    ...configured,
+    backupsDir: options.backupsDir ?? path.join(path.dirname(configured.dbPath), "backups")
+  };
   const enableUploadLookup = config.enableUploadLookup ?? true;
   const now = config.now || (() => Date.now());
   mkdirSync(config.filesDir, { recursive: true });
   mkdirSync(path.dirname(config.dbPath), { recursive: true });
-  initDb(config.dbPath);
+  mkdirSync(config.backupsDir, { recursive: true });
+  initDb(config.dbPath, { backupsDir: config.backupsDir });
   const repo = new PaperRepository(config.dbPath);
+  if (config.automaticBackupsEnabled ?? true) scheduleAutomaticBackup(repo, config, now);
   const app = express();
 
   app.use(express.json({ limit: "2mb" }));
@@ -379,6 +453,69 @@ export function createApp(options = {}) {
 
   app.get("/api/health", (_request, response) => {
     response.json({ ok: true });
+  });
+
+  app.get("/api/backups", (_request, response) => {
+    response.json(repo.listBackupRecords().map(publicBackup));
+  });
+
+  app.post("/api/backups", (request, response, next) => {
+    try {
+      const type = request.body?.type;
+      if (type !== "database" && type !== "full") {
+        response.status(400).json({ error: "Backup type must be database or full" });
+        return;
+      }
+      response.status(201).json(publicBackup(createAndRecordBackup(repo, config, type, "manual", now)));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/backups/:id/restore", (request, response, next) => {
+    try {
+      if (request.body?.confirm !== true) {
+        response.status(400).json({ error: "Restore confirmation is required" });
+        return;
+      }
+      const id = Number(request.params.id);
+      if (!Number.isSafeInteger(id) || id < 1) {
+        response.status(404).json({ error: "Backup not found" });
+        return;
+      }
+      const record = repo.getBackupRecord(id);
+      if (!record) {
+        response.status(404).json({ error: "Backup not found" });
+        return;
+      }
+      if (!pathInside(config.backupsDir, record.storedPath)) {
+        response.status(400).json({ error: "Invalid backup path" });
+        return;
+      }
+      const validation = validateBackup(path.join(record.storedPath, "manifest.json"));
+      if (!validation.valid) {
+        response.status(400).json({ error: "Invalid backup manifest" });
+        return;
+      }
+      const restored = restoreBackup({
+        dbPath: config.dbPath,
+        filesDir: config.filesDir,
+        backupsDir: config.backupsDir,
+        backupDirectory: record.storedPath,
+        now
+      });
+      if (restored?.directoryPath) {
+        repo.createBackupRecord(record);
+        repo.createBackupRecord(restored);
+      }
+      response.json({ restored: true, backupId: id });
+    } catch (error) {
+      if (error instanceof BackupValidationError) {
+        response.status(400).json({ error: "Invalid backup manifest" });
+        return;
+      }
+      next(error);
+    }
   });
 
   app.post("/api/drafts/from-text", async (request, response, next) => {

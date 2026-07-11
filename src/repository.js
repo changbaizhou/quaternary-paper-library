@@ -129,6 +129,19 @@ function mapPaper(row) {
   };
 }
 
+function mapBackup(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    backupType: row.backup_type,
+    storedPath: row.stored_path,
+    directoryPath: row.stored_path,
+    manifestSha256: row.manifest_sha256,
+    sizeBytes: row.size_bytes,
+    createdAt: row.created_at
+  };
+}
+
 export class VersionConflictError extends Error {
   constructor(expectedVersion, actualVersion) {
     super(`Paper version conflict: expected ${expectedVersion}, found ${actualVersion}`);
@@ -528,6 +541,48 @@ export class PaperRepository {
         throw error;
       }
     });
+  }
+
+  createBackupRecord(record) {
+    return this.withDb((db) => {
+      const values = [
+        record.backupType,
+        record.directoryPath ?? record.storedPath,
+        record.manifestSha256 || "",
+        Number(record.sizeBytes || 0),
+        record.createdAt || new Date().toISOString()
+      ];
+      const result = Number.isSafeInteger(Number(record.id)) && Number(record.id) > 0
+        ? db.prepare(`
+          INSERT OR REPLACE INTO backup_records (id, backup_type, stored_path, manifest_sha256, size_bytes, created_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run(Number(record.id), ...values)
+        : db.prepare(`
+          INSERT INTO backup_records (backup_type, stored_path, manifest_sha256, size_bytes, created_at)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(...values);
+      return this.getBackupRecord(Number(result.lastInsertRowid));
+    });
+  }
+
+  listBackupRecords() {
+    return this.withDb((db) => db.prepare(`
+      SELECT id, backup_type, stored_path, manifest_sha256, size_bytes, created_at
+      FROM backup_records
+      ORDER BY created_at DESC, id DESC
+    `).all().map(mapBackup));
+  }
+
+  getBackupRecord(id) {
+    return this.withDb((db) => mapBackup(db.prepare(`
+      SELECT id, backup_type, stored_path, manifest_sha256, size_bytes, created_at
+      FROM backup_records
+      WHERE id = ?
+    `).get(Number(id))));
+  }
+
+  deleteBackupRecord(id) {
+    return this.withDb((db) => Number(db.prepare("DELETE FROM backup_records WHERE id = ?").run(Number(id)).changes) === 1);
   }
 
   listPendingDrafts() {

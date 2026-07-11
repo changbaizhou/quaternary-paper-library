@@ -14,6 +14,8 @@ async function withServer(callback, overrides = {}) {
   const app = createApp({
     dbPath: path.join(dir, "library.sqlite"),
     filesDir: path.join(dir, "files"),
+    backupsDir: path.join(dir, "backups"),
+    automaticBackupsEnabled: false,
     staticDir: path.resolve("public"),
     ...overrides
   });
@@ -22,7 +24,12 @@ async function withServer(callback, overrides = {}) {
   const baseUrl = `http://127.0.0.1:${port}`;
 
   try {
-    await callback(baseUrl, { dbPath: path.join(dir, "library.sqlite"), dir, filesDir: path.join(dir, "files") });
+    await callback(baseUrl, {
+      dbPath: path.join(dir, "library.sqlite"),
+      dir,
+      filesDir: path.join(dir, "files"),
+      backupsDir: path.join(dir, "backups")
+    });
   } finally {
     await new Promise((resolve) => server.close(resolve));
     await rm(dir, { recursive: true, force: true });
@@ -80,6 +87,98 @@ test("API workflow creates draft, confirms paper, searches, and exports", async 
     const bibtex = await exportResponse.text();
     assert.match(bibtex, /@article/);
     assert.match(bibtex, /doi = \{10.1000\/test\}/);
+  });
+});
+
+test("backup API creates, lists, and restores a database backup", async () => {
+  await withServer(async (baseUrl, { dbPath, backupsDir }) => {
+    const repo = new PaperRepository(dbPath);
+    const draftId = repo.createDraft({ title: "Original backup API paper", classification: {}, confidence: {}, evidence: {} });
+    repo.confirmDraft(draftId);
+
+    assert.equal((await fetch(`${baseUrl}/api/backups`, { method: "GET" })).status, 200);
+    const invalidType = await fetch(`${baseUrl}/api/backups`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ type: "unknown" })
+    });
+    assert.equal(invalidType.status, 400);
+
+    const created = await fetch(`${baseUrl}/api/backups`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ type: "database" })
+    });
+    assert.equal(created.status, 201);
+    const record = await created.json();
+    assert.deepEqual(Object.keys(record).sort(), ["backupType", "createdAt", "id", "sizeBytes"].sort());
+    assert.equal(record.backupType, "database");
+
+    const missingConfirmation = await fetch(`${baseUrl}/api/backups/${record.id}/restore`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({})
+    });
+    assert.equal(missingConfirmation.status, 400);
+
+    repo.createDraft({ title: "Changed backup API paper", classification: {}, confidence: {}, evidence: {} });
+    const restored = await fetch(`${baseUrl}/api/backups/${record.id}/restore`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ confirm: true })
+    });
+    assert.equal(restored.status, 200);
+    assert.equal(new PaperRepository(dbPath).searchPapers()[0].title, "Original backup API paper");
+
+    const backupNames = await readdir(backupsDir);
+    let backupDirectory;
+    for (const name of backupNames) {
+      const candidate = path.join(backupsDir, name, "manifest.json");
+      try {
+        if (JSON.parse(await readFile(candidate, "utf8")).createdAt === record.createdAt) {
+          backupDirectory = path.dirname(candidate);
+          break;
+        }
+      } catch {
+        // Ignore non-backup entries while locating the selected record.
+      }
+    }
+    assert.ok(backupDirectory);
+    const manifestPath = path.join(backupDirectory, "manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    manifest.files[0].sha256 = "bad-hash";
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    const invalidManifest = await fetch(`${baseUrl}/api/backups/${record.id}/restore`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ confirm: true })
+    });
+    assert.equal(invalidManifest.status, 400);
+  });
+});
+
+test("backup API rejects a stored path outside the backup root", async () => {
+  await withServer(async (baseUrl, { dbPath, dir }) => {
+    const created = await fetch(`${baseUrl}/api/backups`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ type: "database" })
+    });
+    const record = await created.json();
+    const db = openDb(dbPath);
+    try {
+      db.prepare("UPDATE backup_records SET stored_path = ? WHERE id = ?").run(path.join(dir, "outside"), record.id);
+    } finally {
+      db.close();
+    }
+
+    const response = await fetch(`${baseUrl}/api/backups/${record.id}/restore`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ confirm: true })
+    });
+    assert.equal(response.status, 400);
+    assert.equal(JSON.stringify(await response.json()).includes(dir), false);
   });
 });
 
