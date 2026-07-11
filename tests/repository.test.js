@@ -5,6 +5,7 @@ import path from "node:path";
 import os from "node:os";
 
 import { initDb, openDb } from "../src/database.js";
+import { normalizeTitle } from "../src/duplicates.js";
 import { removeLibraryFiles } from "../src/fileStorage.js";
 import { PaperRepository } from "../src/repository.js";
 
@@ -661,28 +662,76 @@ test("repository emits DOI and title duplicate pairs once in deterministic order
     const secondTitleId = createPaper({ title: "A Holocene lake sediment record", year: 2020 });
 
     const groups = repo.listDuplicateGroups();
-    assert.deepEqual(groups.doi, [
-      {
-        sourcePaperId: firstDoiId,
-        paperId: secondDoiId,
-        reason: "doi",
-        score: 1,
-        title: "Second metadata paper",
-        year: 2021,
-        doi: "https://doi.org/10.1000/shared."
+    assert.deepEqual(groups.doi, [{ doi: "10.1000/shared", paperIds: [firstDoiId, secondDoiId] }]);
+    assert.deepEqual(groups.title, [{
+      normalizedTitle: "holocene lake sediment record",
+      paperIds: [firstTitleId, secondTitleId]
+    }]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("repository groups more than 512 identical normalized titles directly", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-title-group-"));
+  const dbPath = path.join(dir, "library.sqlite");
+
+  try {
+    initDb(dbPath);
+    const db = openDb(dbPath);
+    try {
+      db.exec("BEGIN");
+      const insert = db.prepare(
+        "INSERT INTO papers (title, normalized_title, year, search_text) VALUES (?, ?, ?, ?)"
+      );
+      for (let index = 0; index < 513; index += 1) {
+        insert.run("The Shared Quaternary Title", "shared quaternary title", 2020, "shared quaternary title");
       }
-    ]);
-    assert.deepEqual(groups.title, [
-      {
-        sourcePaperId: firstTitleId,
-        paperId: secondTitleId,
-        reason: "title",
-        score: 1,
-        title: "A Holocene lake sediment record",
-        year: 2020,
-        doi: ""
+      db.exec("COMMIT");
+    } finally {
+      db.close();
+    }
+
+    const groups = new PaperRepository(dbPath).listDuplicateGroups();
+    assert.deepEqual(groups.title, [{
+      normalizedTitle: "shared quaternary title",
+      paperIds: Array.from({ length: 513 }, (_, index) => index + 1)
+    }]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("repository groups 10,000 identical DOIs without pair expansion", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-doi-group-"));
+  const dbPath = path.join(dir, "library.sqlite");
+
+  try {
+    initDb(dbPath);
+    const db = openDb(dbPath);
+    try {
+      db.exec("BEGIN");
+      const insert = db.prepare(`
+        INSERT INTO papers (doi, normalized_doi, title, normalized_title, year, search_text)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `);
+      for (let index = 0; index < 10_000; index += 1) {
+        const title = `DOI-only paper ${index}`;
+        insert.run("10.1000/concentrated", "10.1000/concentrated", title, normalizeTitle(title), 2020, title.toLowerCase());
       }
-    ]);
+      db.exec("COMMIT");
+    } finally {
+      db.close();
+    }
+
+    const startedAt = performance.now();
+    const groups = new PaperRepository(dbPath).listDuplicateGroups();
+    const elapsedMs = performance.now() - startedAt;
+    assert.ok(elapsedMs < 3_000, `DOI grouping took ${elapsedMs.toFixed(1)}ms`);
+    assert.deepEqual(groups.doi, [{
+      doi: "10.1000/concentrated",
+      paperIds: Array.from({ length: 10_000 }, (_, index) => index + 1)
+    }]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

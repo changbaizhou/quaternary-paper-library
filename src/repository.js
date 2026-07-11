@@ -272,12 +272,33 @@ function duplicateGroups(db) {
   const papersById = new Map(papers.map((paper) => [paper.id, paper]));
   const hashes = new Map();
   const papersByHash = new Map();
+  const titleGroups = new Map();
+  const titleRepresentatives = new Map();
+  const doiGroups = new Map();
+  const normalizedDoiByPaper = new Map();
   for (const paper of papers) {
     const paperHashes = new Set(paper.file_sha256 ? [paper.file_sha256] : []);
     hashes.set(paper.id, paperHashes);
     if (paper.file_sha256) {
       if (!papersByHash.has(paper.file_sha256)) papersByHash.set(paper.file_sha256, new Set());
       papersByHash.get(paper.file_sha256).add(paper.id);
+    }
+
+    const normalizedTitle = paper.normalized_title || normalizeTitle(paper.title);
+    if (normalizedTitle) {
+      if (!titleGroups.has(normalizedTitle)) titleGroups.set(normalizedTitle, new Set());
+      titleGroups.get(normalizedTitle).add(paper.id);
+      const representativeId = titleRepresentatives.get(normalizedTitle);
+      if (representativeId === undefined || paper.id < representativeId) {
+        titleRepresentatives.set(normalizedTitle, paper.id);
+      }
+    }
+
+    const doi = paper.normalized_doi || normalizeDoi(paper.doi);
+    normalizedDoiByPaper.set(paper.id, doi);
+    if (doi) {
+      if (!doiGroups.has(doi)) doiGroups.set(doi, new Set());
+      doiGroups.get(doi).add(paper.id);
     }
   }
   for (const file of files) {
@@ -295,42 +316,39 @@ function duplicateGroups(db) {
     }
   }
 
-  const doiGroups = new Map();
-  for (const paper of papers) {
-    const doi = paper.normalized_doi || normalizeDoi(paper.doi);
-    if (!doi) continue;
-    if (!doiGroups.has(doi)) doiGroups.set(doi, []);
-    doiGroups.get(doi).push(paper.id);
-  }
-  const doiPairs = new Set();
-  const doiCandidates = [];
-  for (const [doi, paperIds] of doiGroups) {
-    const sortedIds = paperIds.sort((left, right) => left - right);
-    for (let leftIndex = 0; leftIndex < sortedIds.length; leftIndex += 1) {
-      for (let rightIndex = leftIndex + 1; rightIndex < sortedIds.length; rightIndex += 1) {
-        const leftId = sortedIds[leftIndex];
-        const rightId = sortedIds[rightIndex];
-        const key = pairKey(leftId, rightId);
-        doiPairs.add(key);
-        unionFind.union(leftId, rightId);
-        if (!sharesHash(hashes.get(leftId), hashes.get(rightId))) {
-          doiCandidates.push({
-            sourcePaperId: leftId,
-            ...compactCandidate(papersById.get(rightId), "doi", 1)
-          });
-        }
-      }
+  for (const paperIds of doiGroups.values()) {
+    const sortedIds = [...paperIds].sort((left, right) => left - right);
+    for (let index = 1; index < sortedIds.length; index += 1) {
+      unionFind.union(sortedIds[0], sortedIds[index]);
     }
   }
 
+  const exactTitleGroups = [...titleGroups.entries()]
+    .filter(([, paperIds]) => paperIds.size > 1)
+    .map(([normalizedTitle, paperIds]) => {
+      const sortedIds = [...paperIds].sort((left, right) => left - right);
+      for (let index = 1; index < sortedIds.length; index += 1) {
+        unionFind.union(sortedIds[0], sortedIds[index]);
+      }
+      return { normalizedTitle, paperIds: sortedIds };
+    })
+    .sort((left, right) => compareText(left.normalizedTitle, right.normalizedTitle));
+
+  const doiOutput = [...doiGroups.entries()]
+    .filter(([, paperIds]) => paperIds.size > 1)
+    .map(([doi, paperIds]) => ({
+      doi,
+      paperIds: [...paperIds].sort((left, right) => left - right)
+    }))
+    .sort((left, right) => compareText(left.doi, right.doi));
+
   const titleIndex = new Map();
-  for (const paper of papers) {
-    const normalizedTitle = paper.normalized_title || normalizeTitle(paper.title);
+  for (const [normalizedTitle, representativeId] of titleRepresentatives) {
     const keys = titleBigrams(normalizedTitle);
-    if (keys.size === 0 && normalizedTitle) keys.add(`title:${normalizedTitle}`);
+    if (keys.size === 0) keys.add(`title:${normalizedTitle}`);
     for (const key of keys) {
       if (!titleIndex.has(key)) titleIndex.set(key, new Set());
-      titleIndex.get(key).add(paper.id);
+      titleIndex.get(key).add(representativeId);
     }
   }
   const titlePairs = new Map();
@@ -348,7 +366,9 @@ function duplicateGroups(db) {
   }
   const titleCandidates = [];
   for (const [key, [leftId, rightId]] of titlePairs) {
-    if (sharesHash(hashes.get(leftId), hashes.get(rightId)) || doiPairs.has(key)) continue;
+    if (sharesHash(hashes.get(leftId), hashes.get(rightId))) continue;
+    const leftDoi = normalizedDoiByPaper.get(leftId);
+    if (leftDoi && leftDoi === normalizedDoiByPaper.get(rightId)) continue;
     const left = papersById.get(leftId);
     const right = papersById.get(rightId);
     const score = titleSimilarity(left.title, right.title);
@@ -369,8 +389,8 @@ function duplicateGroups(db) {
         paperIds: [...paperIds].sort((left, right) => left - right)
       }))
       .sort((left, right) => left.sha256 < right.sha256 ? -1 : left.sha256 > right.sha256 ? 1 : 0),
-    doi: doiCandidates,
-    title: titleCandidates
+    doi: doiOutput,
+    title: [...exactTitleGroups, ...titleCandidates]
   };
   const sortCandidates = (left, right) =>
     unionFind.find(left.sourcePaperId) - unionFind.find(right.sourcePaperId) ||
@@ -384,6 +404,10 @@ function duplicateGroups(db) {
 
 function pairKey(left, right) {
   return `${Math.min(left, right)}:${Math.max(left, right)}`;
+}
+
+function compareText(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function sharesHash(left = new Set(), right = new Set()) {

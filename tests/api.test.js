@@ -520,6 +520,37 @@ test("API returns 404 when a confirmed paper has no source file", async () => {
   });
 });
 
+test("API sanitizes PDF extractor errors before storing or returning draft text", async () => {
+  const absolutePath = path.join(os.tmpdir(), "qpl-private", "failed-extraction.pdf");
+  await withServer(
+    async (baseUrl, { dbPath, dir }) => {
+      const form = new FormData();
+      form.append("files", new Blob(["fake pdf"], { type: "application/pdf" }), "failed.pdf");
+
+      const response = await fetch(`${baseUrl}/api/uploads`, { method: "POST", body: form });
+      assert.equal(response.status, 201);
+      const [draft] = await response.json();
+      assert.equal(draft.extractedText.includes(absolutePath), false);
+      assert.equal(JSON.stringify(draft).includes(dir), false);
+
+      const db = openDb(dbPath);
+      try {
+        const row = db.prepare("SELECT extracted_text FROM drafts WHERE id = ?").get(draft.id);
+        assert.equal(row.extracted_text.includes(absolutePath), false);
+      } finally {
+        db.close();
+      }
+    },
+    {
+      enableUploadLookup: false,
+      extractPdfText: async () => {
+        throw new Error(`cannot read ${absolutePath}`);
+      },
+      extractOcrText: async () => ({ text: "" })
+    }
+  );
+});
+
 test("API detects exact and DOI duplicates while allowing separate confirmation", async () => {
   await withServer(
     async (baseUrl) => {

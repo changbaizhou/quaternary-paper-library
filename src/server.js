@@ -142,8 +142,8 @@ async function extractUploadText(filePath, options = {}) {
 
   try {
     text = await extractPdfText(filePath);
-  } catch (error) {
-    text = `PDF text extraction failed: ${error.message}`;
+  } catch {
+    text = "[PDF text extraction unavailable]";
   }
 
   if (!isPoorTextExtraction(text)) return text;
