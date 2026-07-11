@@ -1,5 +1,6 @@
 import express from "express";
 import multer from "multer";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -83,7 +84,7 @@ function updatePaperResponse(repo, request, response, allowedFields) {
       response.status(404).json({ error: "Paper not found" });
       return;
     }
-    response.json(paper);
+    response.json(publicPaper(paper));
   } catch (error) {
     if (error instanceof VersionConflictError) {
       response.status(409).json({ error: error.message });
@@ -260,6 +261,28 @@ function respondToPaperStateError(error, response, next) {
   next(error);
 }
 
+function publicDraft(draft) {
+  return {
+    id: draft.id,
+    status: draft.status,
+    originalFilename: draft.originalFilename,
+    doi: draft.doi,
+    title: draft.title,
+    authors: draft.authors,
+    journal: draft.journal,
+    year: draft.year,
+    abstract: draft.abstract,
+    authorKeywords: draft.authorKeywords,
+    suggestedKeywords: draft.suggestedKeywords,
+    classification: draft.classification,
+    confidence: draft.confidence,
+    evidence: draft.evidence,
+    duplicateCandidates: draft.duplicateCandidates,
+    extractedText: draft.extractedText,
+    createdAt: draft.createdAt
+  };
+}
+
 function scanPathLabel(filesDir, resolvedPath, storedPath) {
   if (resolvedPath) return path.relative(filesDir, resolvedPath).split(path.sep).join("/");
   return path.basename(String(storedPath || "").replace(/[\\/]+$/, "")) || "rejected";
@@ -279,6 +302,40 @@ function appendCleanup(total, current) {
 function publicPaper(paper) {
   return {
     id: paper.id,
+    doi: paper.doi,
+    title: paper.title,
+    authors: paper.authors,
+    journal: paper.journal,
+    year: paper.year,
+    abstract: paper.abstract,
+    keywords: paper.keywords,
+    themes: paper.themes,
+    regions: paper.regions,
+    periods: paper.periods,
+    materials: paper.materials,
+    methods: paper.methods,
+    proxies: paper.proxies,
+    readingStatus: paper.readingStatus,
+    notesResearchQuestion: paper.notesResearchQuestion,
+    notesRegion: paper.notesRegion,
+    notesMaterialsMethods: paper.notesMaterialsMethods,
+    notesChronology: paper.notesChronology,
+    notesCoreFindings: paper.notesCoreFindings,
+    notesLimits: paper.notesLimits,
+    notesQuotePoints: paper.notesQuotePoints,
+    notesPersonal: paper.notesPersonal,
+    bookmarkPage: paper.bookmarkPage,
+    lastReadPage: paper.lastReadPage,
+    deletedAt: paper.deletedAt,
+    mergedIntoId: paper.mergedIntoId,
+    version: paper.version,
+    status: paper.deletedAt ? "trash" : "active"
+  };
+}
+
+function publicTrashPaper(paper) {
+  return {
+    id: paper.id,
     title: paper.title,
     year: paper.year,
     deletedAt: paper.deletedAt,
@@ -287,9 +344,29 @@ function publicPaper(paper) {
   };
 }
 
+function compensateUpload(repo, filesDir, draftIds, writtenPaths) {
+  const storedPaths = [...writtenPaths];
+  let protectedStoredPaths = [];
+  try {
+    if (draftIds.length > 0) {
+      const deleted = repo.deletePendingDrafts(draftIds);
+      storedPaths.push(...deleted.storedPaths);
+      protectedStoredPaths = deleted.protectedStoredPaths;
+    }
+  } catch {
+    // Preserve the original upload error; cleanup failures must not disclose internals.
+  }
+  try {
+    removeLibraryFiles(filesDir, storedPaths, protectedStoredPaths);
+  } catch {
+    // File cleanup is best effort and must not replace the original error.
+  }
+}
+
 export function createApp(options = {}) {
   const config = { ...defaultConfig, ...options };
   const enableUploadLookup = config.enableUploadLookup ?? true;
+  const now = config.now || (() => Date.now());
   mkdirSync(config.filesDir, { recursive: true });
   mkdirSync(path.dirname(config.dbPath), { recursive: true });
   initDb(config.dbPath);
@@ -312,13 +389,15 @@ export function createApp(options = {}) {
         filename: request.body.filename || "text-import.txt",
         enableLookup: Boolean(request.body.enableLookup)
       });
-      response.status(201).json(draft);
+      response.status(201).json(publicDraft(draft));
     } catch (error) {
       next(error);
     }
   });
 
   app.post("/api/uploads", upload.array("files"), async (request, response, next) => {
+    const writtenPaths = [];
+    const draftIds = [];
     try {
       const drafts = [];
       const year = new Date().getFullYear();
@@ -329,9 +408,10 @@ export function createApp(options = {}) {
         const fileSha256 = fingerprintBuffer(file.buffer);
         const decodedOriginalName = decodePossiblyMojibakeFilename(file.originalname);
         const extension = path.extname(decodedOriginalName) || ".pdf";
-        const storedFilename = `${Date.now()}-${slugify(path.basename(decodedOriginalName, extension))}${extension}`;
+        const storedFilename = `${now()}-${randomUUID()}-${slugify(path.basename(decodedOriginalName, extension))}${extension}`;
         const targetPath = path.join(targetDir, storedFilename);
         writeFileSync(targetPath, file.buffer);
+        writtenPaths.push(targetPath);
 
         const text = await extractUploadText(targetPath, {
           extractPdfText: config.extractPdfText,
@@ -348,17 +428,19 @@ export function createApp(options = {}) {
           fileSha256,
           enableLookup: enableUploadLookup
         });
+        draftIds.push(draft.id);
         drafts.push(draft);
       }
 
-      response.status(201).json(drafts);
+      response.status(201).json(drafts.map(publicDraft));
     } catch (error) {
+      compensateUpload(repo, config.filesDir, draftIds, writtenPaths);
       next(error);
     }
   });
 
   app.get("/api/drafts", (_request, response) => {
-    response.json(repo.listPendingDrafts());
+    response.json(repo.listPendingDrafts().map(publicDraft));
   });
 
   app.delete("/api/drafts/:id", (request, response, next) => {
@@ -379,19 +461,17 @@ export function createApp(options = {}) {
   app.post("/api/drafts/:id/confirm", (request, response, next) => {
     try {
       const paperId = repo.confirmDraft(Number(request.params.id), request.body || {});
-      response.status(201).json(repo.getPaper(paperId));
+      response.status(201).json(publicPaper(repo.getPaper(paperId)));
     } catch (error) {
-      next(error);
+      respondToPaperStateError(error, response, next);
     }
   });
 
   app.get("/api/papers", (request, response) => {
-    response.json(
-      repo.searchPapers({
+    response.json(repo.searchPapers({
         query: request.query.query || "",
         filters: parseFilters(request.query)
-      })
-    );
+      }).map(publicPaper));
   });
 
   app.get("/api/duplicates", (_request, response) => {
@@ -434,19 +514,19 @@ export function createApp(options = {}) {
 
   app.delete("/api/papers/:id", (request, response, next) => {
     try {
-      response.json(publicPaper(repo.trashPaper(Number(request.params.id))));
+      response.json(publicTrashPaper(repo.trashPaper(Number(request.params.id))));
     } catch (error) {
       respondToPaperStateError(error, response, next);
     }
   });
 
   app.get("/api/trash", (_request, response) => {
-    response.json(repo.listTrashedPapers().map(publicPaper));
+    response.json(repo.listTrashedPapers().map(publicTrashPaper));
   });
 
   app.post("/api/trash/:id/restore", (request, response, next) => {
     try {
-      response.json(publicPaper(repo.restorePaper(Number(request.params.id))));
+      response.json(publicTrashPaper(repo.restorePaper(Number(request.params.id))));
     } catch (error) {
       respondToPaperStateError(error, response, next);
     }
@@ -461,7 +541,7 @@ export function createApp(options = {}) {
         purged.storedPaths,
         purged.protectedStoredPaths
       );
-      response.json({ paper: publicPaper(purged.paper), cleanup });
+      response.json({ paper: publicTrashPaper(purged.paper), cleanup });
     } catch (error) {
       respondToPaperStateError(error, response, next);
     }
@@ -476,7 +556,7 @@ export function createApp(options = {}) {
         cleanup,
         removeLibraryFiles(config.filesDir, result.storedPaths, result.protectedStoredPaths)
       );
-      response.json({ papers: result.papers.map(publicPaper), cleanup });
+      response.json({ papers: result.papers.map(publicTrashPaper), cleanup });
     } catch (error) {
       respondToPaperStateError(error, response, next);
     }
@@ -505,7 +585,7 @@ export function createApp(options = {}) {
         response.status(404).json({ error: "Paper not found" });
         return;
       }
-      response.json(paper);
+      response.json(publicPaper(paper));
     } catch (error) {
       if (error instanceof RangeError) {
         response.status(400).json({ error: error.message });
@@ -597,7 +677,7 @@ export function createApp(options = {}) {
   });
 
   app.use((error, _request, response, _next) => {
-    response.status(500).json({ error: error.message || "Internal server error" });
+    response.status(500).json({ error: "服务器内部错误" });
   });
 
   return app;

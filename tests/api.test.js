@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { access, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 
 import { createApp } from "../src/server.js";
 import { openDb } from "../src/database.js";
+import { fingerprintBuffer } from "../src/duplicates.js";
 import { PaperRepository } from "../src/repository.js";
 
 async function withServer(callback, overrides = {}) {
@@ -82,6 +83,160 @@ test("API workflow creates draft, confirms paper, searches, and exports", async 
   });
 });
 
+test("API omits internal file fields from draft and paper responses", async () => {
+  await withServer(async (baseUrl) => {
+    const createResponse = await fetch(`${baseUrl}/api/drafts/from-text`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ filename: "public.pdf", text: "Public response paper" })
+    });
+    const draft = await createResponse.json();
+    const pending = await (await fetch(`${baseUrl}/api/drafts`)).json();
+    for (const body of [draft, pending[0]]) {
+      assert.equal("storedFilename" in body, false);
+      assert.equal("storedPath" in body, false);
+      assert.equal("fileSha256" in body, false);
+      assert.equal("paperFiles" in body, false);
+    }
+
+    const confirmResponse = await fetch(`${baseUrl}/api/drafts/${draft.id}/confirm`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: draft.title })
+    });
+    const paper = await confirmResponse.json();
+    const papers = await (await fetch(`${baseUrl}/api/papers`)).json();
+    for (const body of [paper, papers[0]]) {
+      assert.equal("storedFilename" in body, false);
+      assert.equal("storedPath" in body, false);
+      assert.equal("fileSha256" in body, false);
+      assert.equal("paperFiles" in body, false);
+    }
+  });
+});
+
+test("API returns 404 for confirming a missing draft", async () => {
+  await withServer(async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/drafts/999999/confirm`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({})
+    });
+    assert.equal(response.status, 404);
+    assert.deepEqual(await response.json(), { error: "Draft not found" });
+  });
+});
+
+test("API stores same-name same-millisecond uploads separately with correct hashes", async () => {
+  await withServer(
+    async (baseUrl, { dbPath, filesDir }) => {
+      const firstBody = "%PDF-1.4\nfirst upload\n%%EOF";
+      const secondBody = "%PDF-1.4\nsecond upload\n%%EOF";
+      const form = new FormData();
+      form.append("files", new Blob([firstBody], { type: "application/pdf" }), "same-name.pdf");
+      form.append("files", new Blob([secondBody], { type: "application/pdf" }), "same-name.pdf");
+
+      const response = await fetch(`${baseUrl}/api/uploads`, { method: "POST", body: form });
+      assert.equal(response.status, 201);
+      const drafts = await response.json();
+      assert.equal(drafts.length, 2);
+      assert.equal("storedPath" in drafts[0], false);
+      assert.equal("fileSha256" in drafts[0], false);
+
+      const db = openDb(dbPath);
+      let rows;
+      try {
+        rows = db.prepare(
+          "SELECT stored_path, file_sha256 FROM drafts ORDER BY id ASC"
+        ).all();
+      } finally {
+        db.close();
+      }
+      assert.equal(new Set(rows.map((row) => row.stored_path)).size, 2);
+      assert.deepEqual(rows.map((row) => row.file_sha256), [
+        fingerprintBuffer(Buffer.from(firstBody)),
+        fingerprintBuffer(Buffer.from(secondBody))
+      ]);
+      assert.deepEqual((await readdir(path.join(filesDir, String(new Date().getFullYear())))).sort(),
+        rows.map((row) => path.basename(row.stored_path)).sort());
+      assert.deepEqual(await Promise.all(rows.map((row) => readFile(path.resolve(row.stored_path)))), [
+        Buffer.from(firstBody),
+        Buffer.from(secondBody)
+      ]);
+    },
+    {
+      enableUploadLookup: false,
+      now: () => 1_700_000_000_000,
+      extractPdfText: async (filePath) => `Same-name upload ${path.basename(filePath)}`
+    }
+  );
+});
+
+test("API compensates every upload artifact when a later file fails", async () => {
+  await withServer(
+    async (baseUrl, { dbPath, filesDir, dir }) => {
+      const db = openDb(dbPath);
+      try {
+        db.exec(`
+          CREATE TRIGGER reject_second_upload BEFORE INSERT ON drafts
+          WHEN NEW.original_filename = 'second.pdf'
+          BEGIN SELECT RAISE(ABORT, 'second upload failed'); END;
+        `);
+      } finally {
+        db.close();
+      }
+
+      const form = new FormData();
+      form.append("files", new Blob(["%PDF-1.4\nfirst\n%%EOF"], { type: "application/pdf" }), "first.pdf");
+      form.append("files", new Blob(["%PDF-1.4\nsecond\n%%EOF"], { type: "application/pdf" }), "second.pdf");
+
+      const response = await fetch(`${baseUrl}/api/uploads`, { method: "POST", body: form });
+      const body = await response.json();
+      assert.equal(response.status, 500);
+      assert.deepEqual(body, { error: "服务器内部错误" });
+      assert.equal(JSON.stringify(body).includes(dir), false);
+
+      const afterFailure = openDb(dbPath);
+      try {
+        assert.equal(afterFailure.prepare("SELECT COUNT(*) AS count FROM drafts").get().count, 0);
+        assert.equal(afterFailure.prepare("SELECT COUNT(*) AS count FROM paper_files").get().count, 0);
+      } finally {
+        afterFailure.close();
+      }
+      const yearDir = path.join(filesDir, String(new Date().getFullYear()));
+      assert.deepEqual(await readdir(yearDir), []);
+    },
+    {
+      enableUploadLookup: false,
+      extractPdfText: async () => "Upload paper"
+    }
+  );
+});
+
+test("API sanitizes unknown global errors", async () => {
+  await withServer(async (baseUrl, { dbPath, dir }) => {
+    const db = openDb(dbPath);
+    try {
+      db.exec(`
+        CREATE TRIGGER leak_error BEFORE INSERT ON drafts
+        BEGIN SELECT RAISE(ABORT, 'database failure at ${dir.replaceAll("'", "''")}\\private.sqlite'); END;
+      `);
+    } finally {
+      db.close();
+    }
+
+    const response = await fetch(`${baseUrl}/api/drafts/from-text`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ filename: "error.txt", text: "Trigger error" })
+    });
+    const body = await response.json();
+    assert.equal(response.status, 500);
+    assert.deepEqual(body, { error: "服务器内部错误" });
+    assert.equal(JSON.stringify(body).includes(dir), false);
+  });
+});
+
 test("API edits confirmed paper metadata and notes with conflict protection", async () => {
   await withServer(async (baseUrl) => {
     const createResponse = await fetch(`${baseUrl}/api/drafts/from-text`, {
@@ -136,8 +291,8 @@ test("API edits confirmed paper metadata and notes with conflict protection", as
     const edited = await editResponse.json();
     assert.equal(edited.version, 2);
     assert.equal(edited.title, "Edited title");
-    assert.equal(edited.storedPath, paper.storedPath);
-    assert.equal(edited.fileSha256, paper.fileSha256);
+    assert.equal("storedPath" in edited, false);
+    assert.equal("fileSha256" in edited, false);
     assert.equal(edited.deletedAt, null);
     assert.equal(edited.mergedIntoId, null);
 

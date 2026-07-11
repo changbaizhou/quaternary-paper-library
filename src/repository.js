@@ -1,6 +1,6 @@
 import { openDb } from "./database.js";
 import { metadataFields, noteFields } from "./paperData.js";
-import { normalizeDoi, normalizeTitle, titleSimilarity } from "./duplicates.js";
+import { normalizeDoi, normalizeTitle, titleBigrams, titleSimilarity } from "./duplicates.js";
 
 const draftJsonFields = {
   authors: "authors_json",
@@ -174,6 +174,7 @@ function mergeUnique(...lists) {
 }
 
 const duplicateReasonOrder = ["sha256", "doi", "title"];
+const maxTitlePostingSize = 512;
 
 function activePaperRows(db) {
   return db.prepare(`
@@ -203,6 +204,22 @@ function paperHashMap(db) {
     if (row.file_sha256) hashes.get(row.id).add(row.file_sha256);
   }
   return hashes;
+}
+
+function activePaperData(db) {
+  const papers = activePaperRows(db);
+  const files = db.prepare(`
+    SELECT paper_id, sha256
+    FROM paper_files
+    JOIN papers ON papers.id = paper_files.paper_id
+    WHERE paper_files.paper_id IS NOT NULL
+      AND paper_files.status = 'active'
+      AND paper_files.sha256 <> ''
+      AND papers.deleted_at IS NULL
+      AND papers.merged_into_id IS NULL
+    ORDER BY paper_files.id ASC
+  `).all();
+  return { papers, files };
 }
 
 function compactCandidate(row, reason, score) {
@@ -251,13 +268,97 @@ function findDuplicateCandidates(db, input = {}) {
 }
 
 function duplicateGroups(db) {
-  const hashes = paperHashMap(db);
+  const { papers, files } = activePaperData(db);
+  const papersById = new Map(papers.map((paper) => [paper.id, paper]));
+  const hashes = new Map();
   const papersByHash = new Map();
-  for (const [paperId, paperHashes] of hashes) {
-    for (const sha256 of paperHashes) {
-      if (!papersByHash.has(sha256)) papersByHash.set(sha256, new Set());
-      papersByHash.get(sha256).add(paperId);
+  for (const paper of papers) {
+    const paperHashes = new Set(paper.file_sha256 ? [paper.file_sha256] : []);
+    hashes.set(paper.id, paperHashes);
+    if (paper.file_sha256) {
+      if (!papersByHash.has(paper.file_sha256)) papersByHash.set(paper.file_sha256, new Set());
+      papersByHash.get(paper.file_sha256).add(paper.id);
     }
+  }
+  for (const file of files) {
+    if (!hashes.has(file.paper_id)) hashes.set(file.paper_id, new Set());
+    hashes.get(file.paper_id).add(file.sha256);
+    if (!papersByHash.has(file.sha256)) papersByHash.set(file.sha256, new Set());
+    papersByHash.get(file.sha256).add(file.paper_id);
+  }
+
+  const unionFind = new DeterministicUnionFind(papers.map((paper) => paper.id));
+  for (const paperIds of papersByHash.values()) {
+    const sortedIds = [...paperIds].sort((left, right) => left - right);
+    for (let index = 1; index < sortedIds.length; index += 1) {
+      unionFind.union(sortedIds[0], sortedIds[index]);
+    }
+  }
+
+  const doiGroups = new Map();
+  for (const paper of papers) {
+    const doi = paper.normalized_doi || normalizeDoi(paper.doi);
+    if (!doi) continue;
+    if (!doiGroups.has(doi)) doiGroups.set(doi, []);
+    doiGroups.get(doi).push(paper.id);
+  }
+  const doiPairs = new Set();
+  const doiCandidates = [];
+  for (const [doi, paperIds] of doiGroups) {
+    const sortedIds = paperIds.sort((left, right) => left - right);
+    for (let leftIndex = 0; leftIndex < sortedIds.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < sortedIds.length; rightIndex += 1) {
+        const leftId = sortedIds[leftIndex];
+        const rightId = sortedIds[rightIndex];
+        const key = pairKey(leftId, rightId);
+        doiPairs.add(key);
+        unionFind.union(leftId, rightId);
+        if (!sharesHash(hashes.get(leftId), hashes.get(rightId))) {
+          doiCandidates.push({
+            sourcePaperId: leftId,
+            ...compactCandidate(papersById.get(rightId), "doi", 1)
+          });
+        }
+      }
+    }
+  }
+
+  const titleIndex = new Map();
+  for (const paper of papers) {
+    const normalizedTitle = paper.normalized_title || normalizeTitle(paper.title);
+    const keys = titleBigrams(normalizedTitle);
+    if (keys.size === 0 && normalizedTitle) keys.add(`title:${normalizedTitle}`);
+    for (const key of keys) {
+      if (!titleIndex.has(key)) titleIndex.set(key, new Set());
+      titleIndex.get(key).add(paper.id);
+    }
+  }
+  const titlePairs = new Map();
+  for (const candidateIds of titleIndex.values()) {
+    // Common bigrams are poor evidence and would recreate a quadratic candidate set.
+    if (candidateIds.size > maxTitlePostingSize) continue;
+    const sortedIds = [...candidateIds].sort((left, right) => left - right);
+    for (let leftIndex = 0; leftIndex < sortedIds.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < sortedIds.length; rightIndex += 1) {
+        const leftId = sortedIds[leftIndex];
+        const rightId = sortedIds[rightIndex];
+        titlePairs.set(pairKey(leftId, rightId), [leftId, rightId]);
+      }
+    }
+  }
+  const titleCandidates = [];
+  for (const [key, [leftId, rightId]] of titlePairs) {
+    if (sharesHash(hashes.get(leftId), hashes.get(rightId)) || doiPairs.has(key)) continue;
+    const left = papersById.get(leftId);
+    const right = papersById.get(rightId);
+    const score = titleSimilarity(left.title, right.title);
+    const matchingYear = left.year === null || right.year === null || left.year === right.year;
+    if (score < 0.92 || !matchingYear) continue;
+    unionFind.union(leftId, rightId);
+    titleCandidates.push({
+      sourcePaperId: leftId,
+      ...compactCandidate(right, "title", score)
+    });
   }
 
   const groups = {
@@ -268,23 +369,52 @@ function duplicateGroups(db) {
         paperIds: [...paperIds].sort((left, right) => left - right)
       }))
       .sort((left, right) => left.sha256 < right.sha256 ? -1 : left.sha256 > right.sha256 ? 1 : 0),
-    doi: [],
-    title: []
+    doi: doiCandidates,
+    title: titleCandidates
   };
-  for (const row of activePaperRows(db)) {
-    for (const candidate of findDuplicateCandidates(db, {
-      sha256: row.file_sha256,
-      doi: row.doi,
-      title: row.title,
-      year: row.year,
-      excludePaperId: row.id
-    })) {
-      if (candidate.reason !== "sha256") {
-        groups[candidate.reason].push({ sourcePaperId: row.id, ...candidate });
-      }
-    }
-  }
+  const sortCandidates = (left, right) =>
+    unionFind.find(left.sourcePaperId) - unionFind.find(right.sourcePaperId) ||
+    left.sourcePaperId - right.sourcePaperId ||
+    left.paperId - right.paperId ||
+    right.score - left.score;
+  groups.doi.sort(sortCandidates);
+  groups.title.sort(sortCandidates);
   return groups;
+}
+
+function pairKey(left, right) {
+  return `${Math.min(left, right)}:${Math.max(left, right)}`;
+}
+
+function sharesHash(left = new Set(), right = new Set()) {
+  const smaller = left.size <= right.size ? left : right;
+  const larger = smaller === left ? right : left;
+  for (const hash of smaller) {
+    if (larger.has(hash)) return true;
+  }
+  return false;
+}
+
+class DeterministicUnionFind {
+  constructor(ids) {
+    this.parent = new Map(ids.map((id) => [id, id]));
+  }
+
+  find(id) {
+    const parent = this.parent.get(id);
+    if (parent === id) return id;
+    const root = this.find(parent);
+    this.parent.set(id, root);
+    return root;
+  }
+
+  union(left, right) {
+    const leftRoot = this.find(left);
+    const rightRoot = this.find(right);
+    if (leftRoot === rightRoot) return;
+    if (leftRoot < rightRoot) this.parent.set(rightRoot, leftRoot);
+    else this.parent.set(leftRoot, rightRoot);
+  }
 }
 
 function makeSearchText(paper) {
@@ -437,23 +567,30 @@ export class PaperRepository {
   }
 
   deletePendingDraft(id) {
+    return this.deletePendingDrafts([id]);
+  }
+
+  deletePendingDrafts(ids) {
     return this.withDb((db) => {
       db.exec("BEGIN IMMEDIATE");
       try {
-        const draft = db.prepare("SELECT * FROM drafts WHERE id = ?").get(id);
-        if (!draft) throw new DraftNotFoundError();
-        if (draft.status !== "pending") {
+        const draftIds = [...new Set(ids.map((id) => Number(id)))];
+        if (draftIds.length === 0) throw new DraftNotFoundError();
+        const placeholders = draftIds.map(() => "?").join(", ");
+        const drafts = db.prepare(`SELECT * FROM drafts WHERE id IN (${placeholders})`).all(...draftIds);
+        if (drafts.length !== draftIds.length) throw new DraftNotFoundError();
+        if (drafts.some((draft) => draft.status !== "pending")) {
           throw new PaperStateError("Only pending drafts can be deleted");
         }
 
         const storedPaths = [
-          draft.stored_path,
+          ...drafts.map((draft) => draft.stored_path),
           ...db.prepare(
-            "SELECT stored_path FROM paper_files WHERE draft_id = ? AND stored_path <> ''"
-          ).all(id).map((row) => row.stored_path)
+            `SELECT stored_path FROM paper_files WHERE draft_id IN (${placeholders}) AND stored_path <> ''`
+          ).all(...draftIds).map((row) => row.stored_path)
         ].filter(Boolean);
-        db.prepare("DELETE FROM paper_files WHERE draft_id = ?").run(id);
-        db.prepare("DELETE FROM drafts WHERE id = ? AND status = 'pending'").run(id);
+        db.prepare(`DELETE FROM paper_files WHERE draft_id IN (${placeholders})`).run(...draftIds);
+        db.prepare(`DELETE FROM drafts WHERE id IN (${placeholders}) AND status = 'pending'`).run(...draftIds);
         const protectedStoredPaths = [
           ...db.prepare("SELECT stored_path FROM papers WHERE stored_path <> ''").all().map((row) => row.stored_path),
           ...db.prepare("SELECT stored_path FROM paper_files WHERE stored_path <> ''").all().map((row) => row.stored_path)
@@ -475,7 +612,7 @@ export class PaperRepository {
       db.exec("BEGIN IMMEDIATE");
       try {
         const draft = mapDraft(db.prepare("SELECT * FROM drafts WHERE id = ?").get(id));
-        if (!draft) throw new Error(`Draft ${id} not found`);
+        if (!draft) throw new DraftNotFoundError();
 
       const classification = {
         themes: overrides.themes ?? draft.classification.themes ?? [],

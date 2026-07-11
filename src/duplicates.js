@@ -15,7 +15,7 @@ export function fingerprintBuffer(buffer) {
   return createHash("sha256").update(buffer).digest("hex");
 }
 
-function titleBigrams(value) {
+export function titleBigrams(value) {
   const words = normalizeTitle(value).split(/\s+/u).filter(Boolean);
   const bigrams = new Set();
   for (let index = 0; index < words.length - 1; index += 1) {

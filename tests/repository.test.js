@@ -579,6 +579,22 @@ test("repository deletes only pending drafts and returns their cleanup paths", a
   }
 });
 
+test("repository confirms a missing draft with DraftNotFoundError", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-missing-draft-"));
+  const dbPath = path.join(dir, "library.sqlite");
+
+  try {
+    initDb(dbPath);
+    const repo = new PaperRepository(dbPath);
+    assert.throws(
+      () => repo.confirmDraft(999999),
+      (error) => error.name === "DraftNotFoundError"
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("repository groups matching active secondary file hashes once", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-hash-groups-"));
   const dbPath = path.join(dir, "library.sqlite");
@@ -620,6 +636,52 @@ test("repository groups matching active secondary file hashes once", async () =>
     assert.deepEqual(repo.listDuplicateGroups().sha256, [
       { sha256: "another-hash", paperIds: [firstPaperId, thirdPaperId] },
       { sha256: "shared-hash", paperIds: [firstPaperId, secondPaperId] }
+    ]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("repository emits DOI and title duplicate pairs once in deterministic order", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-metadata-groups-"));
+  const dbPath = path.join(dir, "library.sqlite");
+
+  try {
+    initDb(dbPath);
+    const repo = new PaperRepository(dbPath);
+    const createPaper = (input) => repo.confirmDraft(repo.createDraft({
+      classification: {},
+      confidence: {},
+      evidence: {},
+      ...input
+    }));
+    const firstDoiId = createPaper({ doi: "10.1000/shared", title: "First metadata paper", year: 2020 });
+    const secondDoiId = createPaper({ doi: "https://doi.org/10.1000/shared.", title: "Second metadata paper", year: 2021 });
+    const firstTitleId = createPaper({ title: "Holocene lake sediment record", year: 2020 });
+    const secondTitleId = createPaper({ title: "A Holocene lake sediment record", year: 2020 });
+
+    const groups = repo.listDuplicateGroups();
+    assert.deepEqual(groups.doi, [
+      {
+        sourcePaperId: firstDoiId,
+        paperId: secondDoiId,
+        reason: "doi",
+        score: 1,
+        title: "Second metadata paper",
+        year: 2021,
+        doi: "https://doi.org/10.1000/shared."
+      }
+    ]);
+    assert.deepEqual(groups.title, [
+      {
+        sourcePaperId: firstTitleId,
+        paperId: secondTitleId,
+        reason: "title",
+        score: 1,
+        title: "A Holocene lake sediment record",
+        year: 2020,
+        doi: ""
+      }
     ]);
   } finally {
     await rm(dir, { recursive: true, force: true });
