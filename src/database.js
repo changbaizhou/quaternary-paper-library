@@ -1,14 +1,17 @@
 import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import {
+  existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   rmdirSync,
   statSync,
   writeFileSync
 } from "node:fs";
 import path from "node:path";
+import { Worker } from "node:worker_threads";
 
 import { hasPendingMigrations, runMigrations } from "./migrations.js";
 
@@ -35,7 +38,8 @@ function createPreMigrationSnapshot(db, backupsDir) {
 
 const LOCK_RETRY_MS = 25;
 const LOCK_TIMEOUT_MS = 15_000;
-const OWNER_GRACE_MS = 1_000;
+const LEASE_DURATION_MS = 5_000;
+const HEARTBEAT_INTERVAL_MS = 1_000;
 
 function sleep(milliseconds) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
@@ -50,23 +54,14 @@ function readLockOwner(ownerPath) {
   }
 }
 
-function processIsAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error.code !== "ESRCH";
-  }
-}
-
-function removeLock(lockPath, expectedToken = null) {
+function removeLockDirectory(lockPath, expectedNonce = null) {
   const ownerPath = path.join(lockPath, "owner.json");
   const owner = readLockOwner(ownerPath);
-  if (expectedToken && owner?.token !== expectedToken) return false;
+  if (expectedNonce && owner?.nonce !== expectedNonce) return false;
 
   try {
     rmSync(ownerPath, { force: true });
+    rmSync(path.join(lockPath, "heartbeat"), { force: true });
     rmdirSync(lockPath);
     return true;
   } catch (error) {
@@ -75,49 +70,131 @@ function removeLock(lockPath, expectedToken = null) {
   }
 }
 
-function clearStaleLock(lockPath) {
-  const owner = readLockOwner(path.join(lockPath, "owner.json"));
-  if (owner && !processIsAlive(owner.pid)) {
-    return removeLock(lockPath, owner.token);
+function leaseIsExpired(lockPath, owner) {
+  if (
+    !owner ||
+    typeof owner.nonce !== "string" ||
+    !Number.isFinite(owner.leaseDurationMs) ||
+    owner.leaseDurationMs <= 0
+  ) {
+    return false;
   }
-  if (owner) return false;
 
   try {
-    if (Date.now() - statSync(lockPath).mtimeMs > OWNER_GRACE_MS) {
-      return removeLock(lockPath);
-    }
+    const heartbeat = statSync(path.join(lockPath, "heartbeat"));
+    return Date.now() - heartbeat.mtimeMs > owner.leaseDurationMs;
   } catch (error) {
-    if (error.code === "ENOENT") return true;
+    if (error.code === "ENOENT") return false;
     throw error;
   }
-  return false;
 }
 
-function acquireInitializationLock(dbPath) {
+function reclaimExpiredLock(lockPath) {
+  const owner = readLockOwner(path.join(lockPath, "owner.json"));
+  if (!leaseIsExpired(lockPath, owner)) return false;
+
+  const stalePath = `${lockPath}.stale-${randomUUID()}`;
+  try {
+    renameSync(lockPath, stalePath);
+  } catch (error) {
+    if (error.code === "ENOENT") return true;
+    return false;
+  }
+
+  return removeLockDirectory(stalePath, owner.nonce);
+}
+
+function startHeartbeat(lockPath, intervalMs) {
+  const heartbeatPath = path.join(lockPath, "heartbeat");
+  const worker = new Worker(`
+    const { utimesSync } = require("node:fs");
+    const { workerData } = require("node:worker_threads");
+    const beat = () => {
+      try {
+        const now = new Date();
+        utimesSync(workerData.heartbeatPath, now, now);
+      } catch (error) {
+        if (error.code === "ENOENT") process.exit(0);
+        throw error;
+      }
+    };
+    beat();
+    setInterval(beat, workerData.intervalMs);
+  `, {
+    eval: true,
+    execArgv: [],
+    workerData: { heartbeatPath, intervalMs }
+  });
+  worker.unref();
+  return worker;
+}
+
+function releasePublishedLock(lockPath, nonce, heartbeatWorker) {
+  heartbeatWorker?.terminate();
+  const owner = readLockOwner(path.join(lockPath, "owner.json"));
+  if (owner?.nonce !== nonce) return false;
+
+  const releasePath = `${lockPath}.release-${nonce}`;
+  try {
+    renameSync(lockPath, releasePath);
+  } catch (error) {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  }
+  return removeLockDirectory(releasePath, nonce);
+}
+
+export function acquireInitializationLock(dbPath, {
+  timeoutMs = LOCK_TIMEOUT_MS,
+  leaseDurationMs = LEASE_DURATION_MS,
+  heartbeatIntervalMs = HEARTBEAT_INTERVAL_MS,
+  beforePublish
+} = {}) {
+  if (heartbeatIntervalMs <= 0 || heartbeatIntervalMs >= leaseDurationMs) {
+    throw new RangeError("heartbeatIntervalMs must be positive and shorter than leaseDurationMs");
+  }
+
   const lockPath = `${path.resolve(dbPath)}.init-lock`;
-  const ownerPath = path.join(lockPath, "owner.json");
-  const token = randomUUID();
-  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
   mkdirSync(path.dirname(lockPath), { recursive: true });
 
   while (true) {
+    const nonce = randomUUID();
+    const temporaryLockPath = `${lockPath}.tmp-${process.pid}-${nonce}`;
     try {
-      mkdirSync(lockPath);
-      writeFileSync(ownerPath, JSON.stringify({ pid: process.pid, token }), "utf8");
-      return () => removeLock(lockPath, token);
+      mkdirSync(temporaryLockPath);
+      writeFileSync(path.join(temporaryLockPath, "owner.json"), JSON.stringify({
+        nonce,
+        pid: process.pid,
+        leaseDurationMs,
+        heartbeatIntervalMs,
+        publishedAt: Date.now()
+      }), "utf8");
+      writeFileSync(path.join(temporaryLockPath, "heartbeat"), "", "utf8");
+      beforePublish?.({ lockPath, temporaryLockPath, nonce });
+      renameSync(temporaryLockPath, lockPath);
+
+      let heartbeatWorker;
+      try {
+        heartbeatWorker = startHeartbeat(lockPath, heartbeatIntervalMs);
+      } catch (error) {
+        releasePublishedLock(lockPath, nonce, null);
+        throw error;
+      }
+      let released = false;
+      return () => {
+        if (released) return false;
+        released = true;
+        return releasePublishedLock(lockPath, nonce, heartbeatWorker);
+      };
     } catch (error) {
-      if (error.code !== "EEXIST") {
-        try {
-          rmSync(ownerPath, { force: true });
-          rmdirSync(lockPath);
-        } catch {
-          // Preserve the original lock acquisition error.
-        }
+      removeLockDirectory(temporaryLockPath, nonce);
+      if (!existsSync(lockPath)) {
         throw error;
       }
     }
 
-    if (clearStaleLock(lockPath)) continue;
+    if (reclaimExpiredLock(lockPath)) continue;
     if (Date.now() >= deadline) {
       throw new Error(`Timed out waiting for database initialization lock: ${lockPath}`);
     }
