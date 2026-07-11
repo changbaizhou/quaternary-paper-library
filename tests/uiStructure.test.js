@@ -145,7 +145,7 @@ test("paper saves coordinate dirty notes and prevent concurrent metadata submits
   assert.match(script, /noteSavePromise:\s*null/);
   assert.match(script, /metadataSavePromise:\s*null/);
   assert.match(script, /await flushPendingNotes\(\)/);
-  assert.match(script, /saveElements\.button\.disabled\s*=\s*true/);
+  assert.match(script, /setDetailFormLocked\(true\)/);
   assert.match(script, /state\.notesDirty\s*=\s*true/);
 });
 
@@ -166,8 +166,41 @@ test("409 recovery retains local edits and reports reload failures", async () =>
   const script = await readFile("public/app.js", "utf8");
 
   assert.match(script, /已保留本地修改/);
-  assert.match(script, /const latestPaper = state\.papers\.find/);
+  assert.match(script, /const latestPaper = allPapers\.find/);
   assert.match(script, /state\.selectedPaper = latestPaper/);
   assert.match(script, /刷新失败/);
   assert.match(script, /reloadPapersAfterConflict\(\)/);
+});
+
+test("metadata and draft submits lock the complete detail form", async () => {
+  const script = await readFile("public/app.js", "utf8");
+
+  assert.match(script, /detailEditableControls/);
+  assert.match(script, /function setDetailFormLocked/);
+  assert.match(script, /setDetailFormLocked\(true\)/);
+  assert.match(script, /setDetailFormLocked\(false\)/);
+  assert.match(script, /draftConfirmPromise:\s*null/);
+  assert.match(script, /if \(state\.draftConfirmPromise\)/);
+});
+
+test("closing the reader force-flushes progress and reports failures", async () => {
+  const script = await readFile("public/app.js", "utf8");
+  const start = script.indexOf("async function closeReaderDocument");
+  const end = script.indexOf("function renderTextLayer", start);
+  const closeReader = script.slice(start, end);
+
+  assert.match(closeReader, /await flushReadingProgress\(\{\s*force:\s*true/);
+  assert.match(closeReader, /progressSaveResult/);
+  assert.match(script, /阅读进度未保存/);
+  assert.match(script, /progressSavePromise\s*=\s*request\.then\([\s\S]*\(error\)\s*=>\s*\(\{\s*error\s*\}\)/);
+});
+
+test("409 recovery loads an unfiltered paper snapshot before refreshing the list", async () => {
+  const script = await readFile("public/app.js", "utf8");
+
+  assert.match(script, /async function loadAllPapers/);
+  assert.match(script, /const allPapers = await loadAllPapers\(\)/);
+  assert.match(script, /const latestPaper = allPapers\.find/);
+  assert.match(script, /await loadPapers\(\)/);
+  assert.match(script, /论文冲突恢复失败：未找到当前论文/);
 });

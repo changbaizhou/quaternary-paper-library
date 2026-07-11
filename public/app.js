@@ -32,6 +32,7 @@ const state = {
   noteSaveRequestId: 0,
   noteSavePromise: null,
   metadataSavePromise: null,
+  draftConfirmPromise: null,
   reader: {
     document: null,
     loadingTask: null,
@@ -87,6 +88,10 @@ const saveElements = {
   button: document.querySelector("#savePaperButton"),
   status: document.querySelector("#paperSaveStatus")
 };
+
+const detailEditableControls = Array.from(
+  document.querySelector("#detailForm").querySelectorAll("input:not([type='hidden']), select, textarea")
+);
 
 const readerElements = {
   listView: document.querySelector("#paperListView"),
@@ -176,6 +181,11 @@ function clearReadingProgressQueue() {
   if (state.reader.progressSaveTimer) clearTimeout(state.reader.progressSaveTimer);
   state.reader.progressSaveTimer = null;
   state.reader.pendingProgress = null;
+}
+
+function setDetailFormLocked(locked) {
+  for (const control of detailEditableControls) control.disabled = locked;
+  saveElements.button.disabled = locked;
 }
 
 function chip(label, className = "") {
@@ -376,12 +386,21 @@ function mergeReadingProgressIntoState(updatedPaper, paperId) {
   updateReaderControls();
 }
 
-async function flushReadingProgress({ reportErrors = false } = {}) {
+async function flushReadingProgress({ reportErrors = false, force = false } = {}) {
+  if (force && state.reader.progressSaveTimer) {
+    clearTimeout(state.reader.progressSaveTimer);
+    state.reader.progressSaveTimer = null;
+  }
   if (!state.reader.paperId) return null;
   if (state.reader.progressSavePromise) {
-    const result = await state.reader.progressSavePromise;
-    if (state.reader.pendingProgress) return flushReadingProgress({ reportErrors });
-    return result;
+    const outcome = await state.reader.progressSavePromise;
+    if (outcome.error) {
+      if (reportErrors) setStatus(outcome.error.message);
+      if (state.reader.pendingProgress) return flushReadingProgress({ reportErrors, force: true });
+      return false;
+    }
+    if (state.reader.pendingProgress) return flushReadingProgress({ reportErrors, force: true });
+    return outcome.updatedPaper;
   }
   const progress = state.reader.pendingProgress;
   if (!progress) return null;
@@ -392,19 +411,24 @@ async function flushReadingProgress({ reportErrors = false } = {}) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(progress)
   });
-  state.reader.progressSavePromise = request;
-  let updatedPaper = null;
-  try {
-    updatedPaper = await request;
-    mergeReadingProgressIntoState(updatedPaper, paperId);
-  } catch (error) {
-    if (reportErrors) setStatus(error.message);
-  } finally {
-    state.reader.progressSavePromise = null;
+  state.reader.progressSavePromise = request.then(
+    (updatedPaper) => ({ updatedPaper }),
+    (error) => ({ error })
+  );
+  const outcome = await state.reader.progressSavePromise;
+  state.reader.progressSavePromise = null;
+  if (outcome.error) {
+    if (reportErrors) setStatus(outcome.error.message);
+    if (state.reader.pendingProgress && state.reader.paperId === paperId) {
+      return flushReadingProgress({ reportErrors, force: true });
+    }
+    return false;
   }
-  if (updatedPaper && state.reader.paperId === paperId && state.reader.pendingProgress) {
-    const latestPaper = await flushReadingProgress({ reportErrors });
-    return latestPaper || updatedPaper;
+  const updatedPaper = outcome.updatedPaper;
+  mergeReadingProgressIntoState(updatedPaper, paperId);
+  if (state.reader.paperId === paperId && state.reader.pendingProgress) {
+    const latestPaper = await flushReadingProgress({ reportErrors, force: true });
+    return latestPaper === false ? false : latestPaper || updatedPaper;
   }
   return updatedPaper;
 }
@@ -505,6 +529,7 @@ function resetRenderedPages() {
 }
 
 async function closeReaderDocument() {
+  const progressSaveResult = await flushReadingProgress({ force: true, reportErrors: true });
   clearReadingProgressQueue();
   state.reader.renderToken += 1;
   resetTranslationState();
@@ -520,6 +545,7 @@ async function closeReaderDocument() {
   state.reader.sourceUrl = "";
   state.reader.bookmarkPage = null;
   state.reader.lastReadPage = null;
+  return progressSaveResult !== false;
 }
 
 function renderTextLayer(pageElement, textContent, viewport) {
@@ -767,12 +793,16 @@ async function openPaperReader(paper) {
 }
 
 async function closeReaderAndShowList() {
-  await closeReaderDocument();
+  const progressSaved = await closeReaderDocument();
   readerElements.viewer.innerHTML = `<div class="empty-state">选择论文后阅读原文件</div>`;
   updateTranslationPanel("未选择文本", "", { hidden: true });
   showPaperListView();
   renderPapers();
-  setStatus("本地资料库");
+  if (progressSaved) {
+    setStatus("本地资料库");
+  } else {
+    setStatus("阅读进度未保存");
+  }
 }
 
 async function loadDrafts() {
@@ -798,6 +828,10 @@ async function loadPapers() {
   }
   state.papers = await api(`/api/papers?${params.toString()}`);
   renderPapers();
+}
+
+async function loadAllPapers() {
+  return api("/api/papers");
 }
 
 function metadataPayload() {
@@ -868,13 +902,18 @@ async function reloadPapersAfterConflict() {
   const localNotes = notesPayload();
   const localNotesDirty = state.notesDirty;
   try {
+    const allPapers = await loadAllPapers();
+    const latestPaper = allPapers.find((paper) => paper.id === selectedPaperId);
     await loadPapers();
-    const latestPaper = state.papers.find((paper) => paper.id === selectedPaperId);
-    if (latestPaper) {
-      state.selectedPaper = latestPaper;
-      renderPapers();
-      restoreLocalFormValues(localMetadata, localNotes);
+    if (!latestPaper) {
+      const missingMessage = "论文冲突恢复失败：未找到当前论文";
+      setPaperSaveState(missingMessage, "is-error");
+      setStatus(missingMessage);
+      return null;
     }
+    state.selectedPaper = latestPaper;
+    renderPapers();
+    restoreLocalFormValues(localMetadata, localNotes);
     state.notesDirty = localNotesDirty;
     setPaperSaveState(message, "is-error");
     setStatus(message);
@@ -890,7 +929,7 @@ async function reloadPapersAfterConflict() {
 async function savePaperMetadata() {
   if (!state.selectedPaper) return null;
   if (state.metadataSavePromise) return state.metadataSavePromise;
-  saveElements.button.disabled = true;
+  setDetailFormLocked(true);
   const promise = (async () => {
     setPaperSaveState("保存中", "is-saving");
     if (!(await flushPendingNotes()) || !state.selectedPaper) return null;
@@ -923,7 +962,7 @@ async function savePaperMetadata() {
     return await promise;
   } finally {
     if (state.metadataSavePromise === promise) state.metadataSavePromise = null;
-    saveElements.button.disabled = false;
+    setDetailFormLocked(false);
   }
 }
 
@@ -1104,19 +1143,30 @@ document.querySelector("#detailForm").addEventListener("submit", async (event) =
     await savePaperMetadata();
     return;
   }
-  setStatus("正在确认入库");
+  if (state.draftConfirmPromise) return state.draftConfirmPromise;
+  setDetailFormLocked(true);
+  const promise = (async () => {
+    setStatus("正在确认入库");
+    try {
+      const paper = await api(`/api/drafts/${id}/confirm`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(formPayload())
+      });
+      await loadDrafts();
+      await loadPapers();
+      fillFormFromPaper(paper);
+      setStatus("已确认入库");
+    } catch (error) {
+      setStatus(error.message);
+    }
+  })();
+  state.draftConfirmPromise = promise;
   try {
-    const paper = await api(`/api/drafts/${id}/confirm`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(formPayload())
-    });
-    await loadDrafts();
-    await loadPapers();
-    fillFormFromPaper(paper);
-    setStatus("已确认入库");
-  } catch (error) {
-    setStatus(error.message);
+    await promise;
+  } finally {
+    if (state.draftConfirmPromise === promise) state.draftConfirmPromise = null;
+    setDetailFormLocked(false);
   }
 });
 
