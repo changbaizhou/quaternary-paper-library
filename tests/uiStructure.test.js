@@ -106,6 +106,21 @@ test("frontend reader automatically translates selected PDF text", async () => {
   assert.match(script, /pendingTranslationSelection/);
 });
 
+test("task 8 exposes library, trash, and maintenance workspace contracts", async () => {
+  const html = await readFile("public/index.html", "utf8");
+  const script = await readFile("public/app.js", "utf8");
+
+  assert.match(html, /id="libraryViewButton"/);
+  assert.match(html, /id="trashViewButton"/);
+  assert.match(html, /id="maintenanceViewButton"/);
+  assert.match(html, /id="duplicateCandidates"/);
+  assert.match(html, /id="trashList"/);
+  assert.match(html, /id="backupList"/);
+  assert.match(script, /\/api\/trash/);
+  assert.match(script, /\/api\/backups/);
+  assert.match(script, /\/merge/);
+});
+
 test("paper detail exposes metadata save and notes autosave wiring", async () => {
   const html = await readFile("public/index.html", "utf8");
   const script = await readFile("public/app.js", "utf8");

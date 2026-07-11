@@ -25,6 +25,10 @@ const noteFieldNames = [
 const state = {
   drafts: [],
   papers: [],
+  trash: [],
+  backups: [],
+  duplicateRows: [],
+  currentView: "library",
   selectedDraft: null,
   selectedPaper: null,
   notesDirty: false,
@@ -114,6 +118,29 @@ const readerElements = {
   translationResultText: document.querySelector("#translationResultText")
 };
 
+const workspaceElements = {
+  library: document.querySelector("#paperListView"),
+  trash: document.querySelector("#trashView"),
+  maintenance: document.querySelector("#maintenanceView"),
+  trashCount: document.querySelector("#trashCount"),
+  trashList: document.querySelector("#trashList"),
+  duplicateCandidates: document.querySelector("#duplicateCandidates"),
+  backupList: document.querySelector("#backupList"),
+  maintenanceProgress: document.querySelector("#maintenanceProgress")
+};
+
+const viewButtons = {
+  library: document.querySelector("#libraryViewButton"),
+  trash: document.querySelector("#trashViewButton"),
+  maintenance: document.querySelector("#maintenanceViewButton")
+};
+
+const DUPLICATE_REASON_LABELS = {
+  sha256: "文件完全相同",
+  doi: "DOI 相同",
+  title: "题名高度相似"
+};
+
 function splitList(value) {
   return String(value || "")
     .split(/[;,，；|]+/)
@@ -163,6 +190,82 @@ async function api(path, options = {}) {
   }
   const type = response.headers.get("content-type") || "";
   return type.includes("application/json") ? response.json() : response.text();
+}
+
+async function apiWithTimeout(path, options = {}, timeoutMs = 15000) {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await api(path, { ...options, signal: controller.signal });
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function formatDateTime(value) {
+  if (!value) return "未记录";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function formatBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 1024) return `${Math.max(0, bytes || 0)} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function confirmAction(title, message, confirmLabel = "确认") {
+  const dialog = document.querySelector("#confirmDialog");
+  if (!dialog?.showModal) return Promise.resolve(window.confirm(`${title}\n\n${message}`));
+  document.querySelector("#confirmDialogTitle").textContent = title;
+  document.querySelector("#confirmDialogMessage").textContent = message;
+  document.querySelector("#confirmDialogConfirm").textContent = confirmLabel;
+  return new Promise((resolve) => {
+    dialog.onclose = () => {
+      dialog.onclose = null;
+      resolve(dialog.returnValue === "confirm");
+    };
+    dialog.showModal();
+  });
+}
+
+function setMaintenanceBusy(busy, message = "") {
+  workspaceElements.maintenance.classList.toggle("is-busy", busy);
+  workspaceElements.maintenanceProgress.hidden = !busy;
+  workspaceElements.maintenanceProgress.textContent = message;
+  for (const button of workspaceElements.maintenance.querySelectorAll("button")) button.disabled = busy;
+}
+
+function showWorkspaceView(view) {
+  state.currentView = view;
+  for (const [name, element] of Object.entries({
+    library: workspaceElements.library,
+    trash: workspaceElements.trash,
+    maintenance: workspaceElements.maintenance
+  })) {
+    element.hidden = name !== view;
+  }
+  readerElements.readerView.hidden = true;
+  readerElements.listView.hidden = view !== "library";
+  for (const [name, button] of Object.entries(viewButtons)) {
+    const active = name === view;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", String(active));
+  }
+}
+
+function duplicateReasonLabel(reason) {
+  return DUPLICATE_REASON_LABELS[reason] || "疑似重复";
 }
 
 function setPaperSaveState(text, stateClass) {
@@ -249,6 +352,100 @@ function renderPapers() {
     .join("");
 }
 
+function renderTrash() {
+  workspaceElements.trashCount.textContent = String(state.trash.length);
+  if (state.trash.length === 0) {
+    workspaceElements.trashList.innerHTML = `<div class="empty-state">回收站为空</div>`;
+    return;
+  }
+  workspaceElements.trashList.innerHTML = `
+    <div class="record-table trash-table">
+      <div class="record-table-head"><span>标题</span><span>删除时间</span><span>恢复</span><span>彻底删除</span></div>
+      ${state.trash.map((paper) => `
+        <div class="record-table-row">
+          <strong title="${escapeHtml(paper.title || "未命名论文")}">${escapeHtml(paper.title || "未命名论文")}</strong>
+          <span>${escapeHtml(formatDateTime(paper.deletedAt))}</span>
+          <button type="button" class="secondary compact-action" data-action="restore-trash" data-paper-id="${paper.id}">恢复</button>
+          <button type="button" class="secondary compact-action danger-action" data-action="purge-trash" data-paper-id="${paper.id}">彻底删除</button>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function duplicatePairs(ids, reason) {
+  const uniqueIds = [...new Set(ids.map(Number).filter((id) => Number.isSafeInteger(id)))].sort((left, right) => left - right);
+  const pairs = [];
+  for (let leftIndex = 0; leftIndex < uniqueIds.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < uniqueIds.length; rightIndex += 1) {
+      pairs.push({ sourcePaperId: uniqueIds[leftIndex], paperId: uniqueIds[rightIndex], reason });
+    }
+  }
+  return pairs;
+}
+
+function buildDuplicateRows(groups, papers) {
+  const paperIds = new Set(papers.map((paper) => paper.id));
+  const rows = [];
+  for (const group of groups.sha256 || []) rows.push(...duplicatePairs(group.paperIds || [], "sha256"));
+  for (const group of groups.doi || []) rows.push(...duplicatePairs(group.paperIds || [], "doi"));
+  for (const group of groups.title || []) {
+    if (Array.isArray(group.paperIds)) rows.push(...duplicatePairs(group.paperIds, "title"));
+    else if (group.sourcePaperId && group.paperId) {
+      rows.push({ sourcePaperId: group.sourcePaperId, paperId: group.paperId, reason: "title", score: group.score });
+    }
+  }
+  return [...new Map(rows
+    .filter((row) => paperIds.has(row.sourcePaperId) && paperIds.has(row.paperId))
+    .map((row) => [`${Math.min(row.sourcePaperId, row.paperId)}:${Math.max(row.sourcePaperId, row.paperId)}`, row])
+  ).values()];
+}
+
+function renderDuplicateCandidates() {
+  const papersById = new Map(state.papers.map((paper) => [paper.id, paper]));
+  if (state.duplicateRows.length === 0) {
+    workspaceElements.duplicateCandidates.innerHTML = `<div class="empty-state">暂未发现重复论文</div>`;
+    return;
+  }
+  workspaceElements.duplicateCandidates.innerHTML = state.duplicateRows.map((row) => {
+    const source = papersById.get(row.sourcePaperId);
+    const target = papersById.get(row.paperId);
+    return `
+      <div class="duplicate-row">
+        <span class="reason-chip">${duplicateReasonLabel(row.reason)}</span>
+        <button type="button" class="record-link" data-action="open-duplicate" data-paper-id="${source.id}">${escapeHtml(source.title || "未命名论文")}</button>
+        <span class="duplicate-separator">与</span>
+        <button type="button" class="record-link" data-action="open-duplicate" data-paper-id="${target.id}">${escapeHtml(target.title || "未命名论文")}</button>
+        <div class="record-actions">
+          <button type="button" class="secondary compact-action" data-action="merge-duplicate" data-target-id="${source.id}" data-source-id="${target.id}">合并两个记录</button>
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+function renderBackups() {
+  if (state.backups.length === 0) {
+    workspaceElements.backupList.innerHTML = `<div class="empty-state">暂无备份</div>`;
+    return;
+  }
+  const typeLabels = { database: "数据库", full: "完整", automatic: "自动" };
+  workspaceElements.backupList.innerHTML = `
+    <div class="record-table backup-table">
+      <div class="record-table-head"><span>备份类型</span><span>时间</span><span>大小</span><span>校验状态</span><span>恢复</span></div>
+      ${state.backups.map((backup) => `
+        <div class="record-table-row">
+          <span>${typeLabels[backup.backupType] || escapeHtml(backup.backupType)}</span>
+          <span>${escapeHtml(formatDateTime(backup.createdAt))}</span>
+          <span>${formatBytes(backup.sizeBytes)}</span>
+          <span class="status-text">已登记</span>
+          <button type="button" class="secondary compact-action" data-action="restore-backup" data-backup-id="${backup.id}">恢复</button>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
 function fillFormFromDraft(draft) {
   clearNoteAutosave({ resetDirty: true });
   state.selectedDraft = draft;
@@ -275,7 +472,9 @@ function fillFormFromDraft(draft) {
   }
   saveElements.button.textContent = "确认入库";
   setPaperSaveState("未修改", "is-neutral");
+  saveElements.button.textContent = "仍然单独入库";
   renderEvidence(draft);
+  renderDraftDuplicateWarning(draft);
 }
 
 function renderEvidence(draft) {
@@ -291,7 +490,36 @@ function renderEvidence(draft) {
   box.textContent = lines.length ? lines.join("\n") : "暂无匹配证据";
 }
 
+function renderDraftDuplicateWarning(draft) {
+  const container = document.querySelector("#draftDuplicateWarning");
+  const candidates = draft.duplicateCandidates || [];
+  container.hidden = candidates.length === 0;
+  if (candidates.length === 0) {
+    container.innerHTML = "";
+    return;
+  }
+  container.innerHTML = `
+    <strong>发现重复候选，请先审阅</strong>
+    <p>默认不合并、不删除；仍可选择单独入库。</p>
+    <div class="draft-duplicate-list">
+      ${candidates.map((candidate) => `
+        <div class="draft-duplicate-row">
+          <span class="reason-chip">${duplicateReasonLabel(candidate.reason)}</span>
+          <span class="draft-candidate-title">${escapeHtml(candidate.title || "未命名论文")}</span>
+          <div class="record-actions">
+            <button type="button" class="secondary compact-action" data-action="open-draft-candidate" data-paper-id="${candidate.paperId}">打开已有论文</button>
+            <button type="button" class="secondary compact-action" data-action="merge-draft" data-paper-id="${candidate.paperId}">合并到此论文</button>
+            <button type="button" class="secondary compact-action danger-action" data-action="discard-draft" data-draft-id="${draft.id}">放弃此次上传</button>
+          </div>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
 function fillFormFromPaper(paper) {
+  document.querySelector("#draftDuplicateWarning").hidden = true;
+  document.querySelector("#draftDuplicateWarning").innerHTML = "";
   clearNoteAutosave({ resetDirty: true });
   state.selectedDraft = null;
   state.selectedPaper = paper;
@@ -326,8 +554,7 @@ function fillFormFromPaper(paper) {
 }
 
 function showPaperListView() {
-  readerElements.readerView.hidden = true;
-  readerElements.listView.hidden = false;
+  showWorkspaceView("library");
 }
 
 function showReaderView() {
@@ -836,6 +1063,66 @@ async function loadAllPapers() {
   return api("/api/papers");
 }
 
+async function loadTrash() {
+  state.trash = await api("/api/trash");
+  renderTrash();
+}
+
+async function loadBackups() {
+  state.backups = await api("/api/backups");
+  renderBackups();
+}
+
+async function loadDuplicateCandidates() {
+  const result = await api("/api/duplicates");
+  const papers = await loadAllPapers();
+  state.duplicateRows = buildDuplicateRows(result.groups || {}, papers);
+  renderDuplicateCandidates();
+}
+
+async function refreshLibraryData() {
+  await Promise.all([loadPapers(), loadTrash()]);
+}
+
+async function openPaperRecord(paperId) {
+  const papers = await loadAllPapers();
+  const paper = papers.find((item) => item.id === Number(paperId));
+  if (!paper) {
+    setStatus("未找到候选论文");
+    return;
+  }
+  state.papers = state.papers.some((item) => item.id === paper.id)
+    ? state.papers.map((item) => item.id === paper.id ? paper : item)
+    : [...state.papers, paper];
+  fillFormFromPaper(paper);
+  showWorkspaceView("library");
+  renderPapers();
+  await openPaperReader(paper);
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+async function waitForHealth(timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const remaining = deadline - Date.now();
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), Math.min(2000, remaining));
+    try {
+      const health = await api("/api/health", { signal: controller.signal });
+      if (health?.ok) return true;
+    } catch {
+      // The service may be restarting; keep polling until the bounded deadline.
+    } finally {
+      window.clearTimeout(timer);
+    }
+    await delay(Math.min(500, Math.max(100, deadline - Date.now())));
+  }
+  throw new Error("服务在规定时间内未恢复，请检查服务状态");
+}
+
 function metadataPayload() {
   return {
     title: fields.title.value.trim(),
@@ -1196,5 +1483,184 @@ document.querySelector("#clearFiltersButton").addEventListener("click", async ()
   await loadPapers();
 });
 
+async function selectWorkspaceView(view) {
+  if (!Object.hasOwn(viewButtons, view)) return;
+  if (!readerElements.readerView.hidden) await closeReaderDocument();
+  showWorkspaceView(view);
+  try {
+    if (view === "trash") await loadTrash();
+    if (view === "maintenance") await Promise.all([loadDuplicateCandidates(), loadBackups()]);
+  } catch (error) {
+    setStatus(error.message);
+  }
+}
+
+for (const [view, button] of Object.entries(viewButtons)) {
+  button.addEventListener("click", () => void selectWorkspaceView(view));
+}
+
+document.querySelector("#trashList").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-action]");
+  if (!button) return;
+  const paperId = Number(button.dataset.paperId);
+  try {
+    if (button.dataset.action === "restore-trash") {
+      await api(`/api/trash/${paperId}/restore`, { method: "POST" });
+      await refreshLibraryData();
+      setStatus("论文已恢复");
+      return;
+    }
+    if (button.dataset.action === "purge-trash") {
+      if (!await confirmAction("彻底删除论文", "该论文及其关联文件将被永久删除，无法恢复。", "彻底删除")) return;
+      await api(`/api/trash/${paperId}`, {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ confirm: true })
+      });
+      await refreshLibraryData();
+      setStatus("论文已彻底删除");
+    }
+  } catch (error) {
+    setStatus(error.message);
+  }
+});
+
+document.querySelector("#emptyTrashButton").addEventListener("click", async () => {
+  if (!state.trash.length) return;
+  if (!await confirmAction("清空回收站", "回收站中的所有论文及其关联文件将被永久删除，无法恢复。", "清空回收站")) return;
+  try {
+    await api("/api/trash", {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ confirm: true })
+    });
+    await refreshLibraryData();
+    setStatus("回收站已清空");
+  } catch (error) {
+    setStatus(error.message);
+  }
+});
+
+async function createBackup(type) {
+  setMaintenanceBusy(true, `正在创建${type === "full" ? "完整" : "数据库"}备份...`);
+  try {
+    await apiWithTimeout("/api/backups", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ type })
+    }, 30000);
+    await loadBackups();
+    setStatus("备份已完成");
+  } catch (error) {
+    setStatus(`备份失败：${error.message}`);
+  } finally {
+    setMaintenanceBusy(false);
+  }
+}
+
+document.querySelector("#databaseBackupButton").addEventListener("click", () => void createBackup("database"));
+document.querySelector("#fullBackupButton").addEventListener("click", () => void createBackup("full"));
+document.querySelector("#scanDuplicatesButton").addEventListener("click", async () => {
+  setMaintenanceBusy(true, "正在扫描重复论文...");
+  try {
+    await apiWithTimeout("/api/duplicates/scan", { method: "POST" }, 30000);
+    await loadDuplicateCandidates();
+    setStatus("重复论文扫描完成");
+  } catch (error) {
+    setStatus(`扫描失败：${error.message}`);
+  } finally {
+    setMaintenanceBusy(false);
+  }
+});
+
+document.querySelector("#backupList").addEventListener("click", async (event) => {
+  const button = event.target.closest('[data-action="restore-backup"]');
+  if (!button) return;
+  const backupId = Number(button.dataset.backupId);
+  if (!await confirmAction("恢复备份", "恢复会替换当前数据库；系统会先保存当前数据库备份。", "恢复备份")) return;
+  setMaintenanceBusy(true, "正在恢复备份，等待服务恢复...");
+  try {
+    await apiWithTimeout(`/api/backups/${backupId}/restore`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ confirm: true })
+    }, 30000);
+    workspaceElements.maintenanceProgress.textContent = "备份已恢复，正在等待服务健康检查...";
+    await waitForHealth(20000);
+    await Promise.all([loadDrafts(), refreshLibraryData(), loadBackups(), loadDuplicateCandidates()]);
+    setStatus("备份恢复完成");
+  } catch (error) {
+    setStatus(`恢复失败：${error.message}`);
+  } finally {
+    setMaintenanceBusy(false);
+  }
+});
+
+document.querySelector("#duplicateCandidates").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-action]");
+  if (!button) return;
+  if (button.dataset.action === "open-duplicate") {
+    try {
+      await openPaperRecord(button.dataset.paperId);
+    } catch (error) {
+      setStatus(error.message);
+    }
+    return;
+  }
+  if (button.dataset.action !== "merge-duplicate") return;
+  if (!await confirmAction("合并重复论文", "将保留第一条记录并把第二条记录合并进去，此操作会先创建备份。", "合并记录")) return;
+  try {
+    const merged = await api(`/api/papers/${button.dataset.targetId}/merge`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sourcePaperId: Number(button.dataset.sourceId), confirm: true })
+    });
+    fillFormFromPaper(merged);
+    await Promise.all([loadPapers(), loadBackups(), loadDuplicateCandidates()]);
+    setStatus("重复论文已合并");
+  } catch (error) {
+    setStatus(`合并失败：${error.message}`);
+  }
+});
+
+document.querySelector("#draftDuplicateWarning").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-action]");
+  if (!button) return;
+  const draftId = Number(fields.draftId.value);
+  try {
+    if (button.dataset.action === "open-draft-candidate") {
+      await openPaperRecord(button.dataset.paperId);
+      return;
+    }
+    if (button.dataset.action === "merge-draft") {
+      if (!await confirmAction("合并上传草稿", "草稿将合并到已有论文，上传文件不再单独入库。", "合并草稿")) return;
+      const merged = await api(`/api/drafts/${draftId}/merge`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ targetPaperId: Number(button.dataset.paperId), confirm: true })
+      });
+      await Promise.all([loadDrafts(), refreshLibraryData(), loadDuplicateCandidates()]);
+      fillFormFromPaper(merged);
+      setStatus("上传草稿已合并");
+      return;
+    }
+    if (button.dataset.action === "discard-draft") {
+      if (!await confirmAction("放弃此次上传", "该上传草稿及其关联文件将被删除。", "放弃上传")) return;
+      await api(`/api/drafts/${draftId}`, { method: "DELETE" });
+      await loadDrafts();
+      state.selectedDraft = null;
+      fields.draftId.value = "";
+      document.querySelector("#draftDuplicateWarning").hidden = true;
+      document.querySelector("#draftDuplicateWarning").innerHTML = "";
+      setStatus("已放弃此次上传");
+    }
+  } catch (error) {
+    setStatus(error.message);
+  }
+});
+
 await loadDrafts();
 await loadPapers();
+await loadTrash();
+await loadBackups();
+await loadDuplicateCandidates();

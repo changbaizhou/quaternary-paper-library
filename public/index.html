@@ -19,10 +19,23 @@
         <input id="pdfInput" type="file" name="files" accept="application/pdf" multiple />
         <button type="submit" class="primary-action">上传 PDF</button>
       </form>
-      <div class="export-group top-actions">
+      <div class="header-actions">
+        <nav class="view-nav" aria-label="视图">
+          <button id="libraryViewButton" type="button" class="view-button is-active" data-view="library" aria-pressed="true">
+            <span aria-hidden="true">▤</span><span>论文库</span>
+          </button>
+          <button id="trashViewButton" type="button" class="view-button" data-view="trash" aria-pressed="false">
+            <span aria-hidden="true">♲</span><span>回收站</span>
+          </button>
+          <button id="maintenanceViewButton" type="button" class="view-button" data-view="maintenance" aria-pressed="false">
+            <span aria-hidden="true">⚙</span><span>维护</span>
+          </button>
+        </nav>
+        <div class="export-group top-actions">
         <a href="/api/export/bibtex">BibTeX</a>
         <a href="/api/export/csv">CSV</a>
         <a href="/api/export/markdown">Markdown</a>
+        </div>
       </div>
     </header>
 
@@ -97,6 +110,48 @@
             <div class="empty-state">选择论文后阅读原文件</div>
           </div>
         </div>
+        <div id="trashView" class="panel-view workspace-record-view" hidden>
+          <div class="panel-heading list-heading">
+            <div>
+              <h2>回收站</h2>
+              <p class="panel-subtitle">已删除论文，恢复或彻底清理</p>
+            </div>
+            <span id="trashCount" class="count-pill">0</span>
+          </div>
+          <div class="view-toolbar">
+            <span class="toolbar-note">删除后的论文暂存于此</span>
+            <button id="emptyTrashButton" type="button" class="secondary">清空回收站</button>
+          </div>
+          <div id="trashList" class="record-list"></div>
+        </div>
+        <div id="maintenanceView" class="panel-view workspace-record-view" hidden>
+          <div class="panel-heading list-heading">
+            <div>
+              <h2>维护</h2>
+              <p class="panel-subtitle">备份数据并检查重复论文</p>
+            </div>
+          </div>
+          <div class="view-toolbar maintenance-toolbar">
+            <button id="databaseBackupButton" type="button" class="secondary">备份数据库</button>
+            <button id="fullBackupButton" type="button" class="secondary">完整备份</button>
+            <button id="scanDuplicatesButton" type="button" class="secondary">扫描重复论文</button>
+          </div>
+          <div id="maintenanceProgress" class="progress-state" hidden aria-live="polite"></div>
+          <section class="maintenance-section">
+            <div class="section-heading-row">
+              <h3>重复论文</h3>
+              <span class="panel-subtitle">逐组审阅后再合并</span>
+            </div>
+            <div id="duplicateCandidates" class="record-list compact-record-list"></div>
+          </section>
+          <section class="maintenance-section">
+            <div class="section-heading-row">
+              <h3>备份</h3>
+              <span class="panel-subtitle">恢复前会创建当前数据库备份</span>
+            </div>
+            <div id="backupList" class="record-list compact-record-list"></div>
+          </section>
+        </div>
       </section>
 
       <section class="detail-panel">
@@ -154,6 +209,7 @@
 
           <section class="detail-section evidence-section">
             <h3>识别证据</h3>
+            <div id="draftDuplicateWarning" class="duplicate-warning" hidden></div>
             <div id="evidenceBox" class="evidence-box"></div>
           </section>
           <div class="detail-save-bar">
@@ -163,6 +219,17 @@
         </form>
       </section>
     </main>
+
+    <dialog id="confirmDialog" class="confirm-dialog">
+      <form method="dialog">
+        <h2 id="confirmDialogTitle">请确认操作</h2>
+        <p id="confirmDialogMessage"></p>
+        <div class="dialog-actions">
+          <button id="confirmDialogCancel" value="cancel" type="submit" class="secondary">取消</button>
+          <button id="confirmDialogConfirm" value="confirm" type="submit">确认</button>
+        </div>
+      </form>
+    </dialog>
 
     <script src="/app.js" type="module"></script>
   </body>
