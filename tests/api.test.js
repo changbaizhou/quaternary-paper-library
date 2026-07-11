@@ -363,6 +363,105 @@ test("API returns 404 when a confirmed paper has no source file", async () => {
   });
 });
 
+test("API trashes, restores, and purges a paper with explicit confirmation", async () => {
+  await withServer(
+    async (baseUrl) => {
+      const pdfBody = "%PDF-1.4\nrecycle bin source\n%%EOF";
+      const form = new FormData();
+      form.append("files", new Blob([pdfBody], { type: "application/pdf" }), "recycle.pdf");
+      const uploadResponse = await fetch(`${baseUrl}/api/uploads`, { method: "POST", body: form });
+      assert.equal(uploadResponse.status, 201);
+      const [draft] = await uploadResponse.json();
+
+      const confirmResponse = await fetch(`${baseUrl}/api/drafts/${draft.id}/confirm`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title: draft.title })
+      });
+      const paper = await confirmResponse.json();
+
+      assert.equal((await fetch(`${baseUrl}/api/papers/999999`, { method: "DELETE" })).status, 404);
+      const trashResponse = await fetch(`${baseUrl}/api/papers/${paper.id}`, { method: "DELETE" });
+      assert.equal(trashResponse.status, 200);
+      assert.equal((await (await fetch(`${baseUrl}/api/papers`)).json()).length, 0);
+      assert.equal((await (await fetch(`${baseUrl}/api/trash`)).json())[0].id, paper.id);
+      assert.equal((await fetch(`${baseUrl}/api/papers/${paper.id}/file`)).status, 200);
+
+      const missingConfirm = await fetch(`${baseUrl}/api/trash/${paper.id}`, {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({})
+      });
+      assert.equal(missingConfirm.status, 400);
+      assert.equal((await fetch(`${baseUrl}/api/papers/${paper.id}/file`)).status, 200);
+
+      assert.equal((await fetch(`${baseUrl}/api/trash/999999/restore`, { method: "POST" })).status, 404);
+      const restoreResponse = await fetch(`${baseUrl}/api/trash/${paper.id}/restore`, { method: "POST" });
+      assert.equal(restoreResponse.status, 200);
+      assert.equal((await (await fetch(`${baseUrl}/api/papers`)).json())[0].id, paper.id);
+
+      await fetch(`${baseUrl}/api/papers/${paper.id}`, { method: "DELETE" });
+      const purgeResponse = await fetch(`${baseUrl}/api/trash/${paper.id}`, {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ confirm: true })
+      });
+      assert.equal(purgeResponse.status, 200);
+      const purgeBody = await purgeResponse.json();
+      assert.ok(purgeBody.cleanup);
+      assert.equal((await fetch(`${baseUrl}/api/papers/${paper.id}/file`)).status, 404);
+      assert.equal((await fetch(`${baseUrl}/api/trash/${paper.id}`, {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ confirm: true })
+      })).status, 404);
+    },
+    {
+      enableUploadLookup: false,
+      extractPdfText: async () => "Recycle bin source paper\nAbstract\nA source file for recycle bin tests."
+    }
+  );
+});
+
+test("API purges every trashed paper only after full-bin confirmation", async () => {
+  await withServer(
+    async (baseUrl) => {
+      const form = new FormData();
+      form.append("files", new Blob(["%PDF-1.4\nfull bin\n%%EOF"], { type: "application/pdf" }), "full-bin.pdf");
+      const uploadResponse = await fetch(`${baseUrl}/api/uploads`, { method: "POST", body: form });
+      const [draft] = await uploadResponse.json();
+      const confirmResponse = await fetch(`${baseUrl}/api/drafts/${draft.id}/confirm`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title: draft.title })
+      });
+      const paper = await confirmResponse.json();
+      await fetch(`${baseUrl}/api/papers/${paper.id}`, { method: "DELETE" });
+
+      const missingConfirm = await fetch(`${baseUrl}/api/trash`, {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({})
+      });
+      assert.equal(missingConfirm.status, 400);
+      assert.equal((await fetch(`${baseUrl}/api/papers/${paper.id}/file`)).status, 200);
+
+      const purgeResponse = await fetch(`${baseUrl}/api/trash`, {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ confirm: true })
+      });
+      assert.equal(purgeResponse.status, 200);
+      assert.equal((await fetch(`${baseUrl}/api/papers/${paper.id}/file`)).status, 404);
+      assert.deepEqual(await (await fetch(`${baseUrl}/api/trash`)).json(), []);
+    },
+    {
+      enableUploadLookup: false,
+      extractPdfText: async () => "Full bin source paper\nAbstract\nA source file for full-bin purge tests."
+    }
+  );
+});
+
 test("API saves reading progress and exposes it in paper list", async () => {
   await withServer(async (baseUrl) => {
     const createResponse = await fetch(`${baseUrl}/api/drafts/from-text`, {

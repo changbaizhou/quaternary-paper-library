@@ -96,6 +96,97 @@ test("repository stores one bookmark and last read page per paper", async () => 
   }
 });
 
+test("repository moves papers through trash, restore, and purge", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-repo-"));
+  const dbPath = path.join(dir, "library.sqlite");
+
+  try {
+    initDb(dbPath);
+    const repo = new PaperRepository(dbPath);
+    const draftId = repo.createDraft({
+      originalFilename: "trash.pdf",
+      storedFilename: "trash.pdf",
+      storedPath: "files/2026/trash.pdf",
+      title: "Paper for recycle bin",
+      classification: {},
+      confidence: {},
+      evidence: {}
+    });
+    const paperId = repo.confirmDraft(draftId);
+
+    const active = repo.getPaper(paperId);
+    repo.trashPaper(paperId);
+    assert.deepEqual(repo.searchPapers(), []);
+    assert.equal(repo.listTrashedPapers()[0].id, paperId);
+    assert.equal(repo.getPaper(paperId).version, active.version + 1);
+
+    const trashedFiles = openDb(dbPath);
+    try {
+      assert.equal(trashedFiles.prepare("SELECT status FROM paper_files WHERE paper_id = ?").get(paperId).status, "trash");
+    } finally {
+      trashedFiles.close();
+    }
+
+    repo.restorePaper(paperId);
+    assert.equal(repo.searchPapers()[0].id, paperId);
+    assert.equal(repo.getPaper(paperId).version, active.version + 2);
+
+    const restoredFiles = openDb(dbPath);
+    try {
+      assert.equal(restoredFiles.prepare("SELECT status FROM paper_files WHERE paper_id = ?").get(paperId).status, "active");
+    } finally {
+      restoredFiles.close();
+    }
+
+    repo.trashPaper(paperId);
+    const purged = repo.purgePaper(paperId);
+    assert.equal(purged.paper.id, paperId);
+    assert.deepEqual(purged.storedPaths, ["files/2026/trash.pdf"]);
+    assert.equal(repo.getPaper(paperId), null);
+
+    const afterPurge = openDb(dbPath);
+    try {
+      assert.equal(afterPurge.prepare("SELECT COUNT(*) AS count FROM paper_files WHERE paper_id = ?").get(paperId).count, 0);
+      assert.equal(afterPurge.prepare("SELECT source_draft_id FROM papers WHERE id = ?").get(paperId), undefined);
+    } finally {
+      afterPurge.close();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("file storage removes only safe PDF paths", async () => {
+  const { removeLibraryFiles, resolveLibraryPdf } = await import("../src/fileStorage.js");
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-files-"));
+
+  try {
+    await import("node:fs/promises").then(({ mkdir, writeFile }) =>
+      mkdir(path.join(dir, "2026"), { recursive: true }).then(() =>
+        writeFile(path.join(dir, "2026", "source.pdf"), "%PDF-1.4")
+      )
+    );
+
+    assert.equal(resolveLibraryPdf(dir, "2026/source.pdf"), path.join(dir, "2026", "source.pdf"));
+    assert.equal(resolveLibraryPdf(dir, "../outside.pdf"), null);
+    assert.equal(resolveLibraryPdf(dir, "2026/source.txt"), null);
+
+    const cleanup = removeLibraryFiles(dir, [
+      "2026/source.pdf",
+      "2026/source.pdf",
+      "2026/missing.pdf",
+      "../outside.pdf",
+      "2026/source.txt"
+    ]);
+    assert.equal(cleanup.removed.length, 1);
+    assert.equal(cleanup.missing.length, 1);
+    assert.equal(cleanup.rejected.length, 2);
+    assert.ok([...cleanup.rejected, ...cleanup.missing, ...cleanup.removed].every((value) => !path.isAbsolute(value)));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("repository updates confirmed papers and rejects stale versions", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-repo-"));
   const dbPath = path.join(dir, "library.sqlite");

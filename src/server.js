@@ -10,6 +10,7 @@ import { exportBibtex, exportCsv, exportMarkdown } from "./exporters.js";
 import { lookupDoiMetadata, lookupTitleMetadata } from "./metadata.js";
 import { extractOcrText as defaultExtractOcrText } from "./ocr.js";
 import { metadataFields, noteFields } from "./paperData.js";
+import { removeLibraryFiles, resolveLibraryPdf } from "./fileStorage.js";
 import {
   detectDoi,
   decodePossiblyMojibakeFilename,
@@ -24,7 +25,12 @@ import {
   parseKeywords,
   parseYear
 } from "./pdfExtract.js";
-import { PaperRepository, VersionConflictError } from "./repository.js";
+import {
+  PaperNotFoundError,
+  PaperRepository,
+  PaperStateError,
+  VersionConflictError
+} from "./repository.js";
 import { classifyText } from "./taxonomy.js";
 import { translateText, TranslationError } from "./translation.js";
 
@@ -121,18 +127,6 @@ function metadataFetch(url, options = {}) {
   return fetch(url, { ...options, signal: AbortSignal.timeout(4500) });
 }
 
-function resolveStoredPdfPath(filesDir, storedPath) {
-  if (!storedPath) return "";
-
-  const filesRoot = path.resolve(filesDir);
-  const resolvedPath = path.resolve(process.cwd(), storedPath);
-  const relative = path.relative(filesRoot, resolvedPath);
-  const outsideFilesDir = relative.startsWith("..") || path.isAbsolute(relative);
-  if (outsideFilesDir || path.extname(resolvedPath).toLowerCase() !== ".pdf") return "";
-
-  return resolvedPath;
-}
-
 async function extractUploadText(filePath, options = {}) {
   const extractPdfText = options.extractPdfText || defaultExtractPdfText;
   const extractOcrText = options.extractOcrText || defaultExtractOcrText;
@@ -222,6 +216,34 @@ function parseFilters(query) {
     if (query[field]) filters[field] = normalizeList(query[field]);
   }
   return filters;
+}
+
+function requirePurgeConfirmation(body) {
+  if (body?.confirm !== true) {
+    throw new TypeError("confirm must be true");
+  }
+}
+
+function respondToPaperStateError(error, response, next) {
+  if (error instanceof PaperNotFoundError) {
+    response.status(404).json({ error: error.message });
+    return;
+  }
+  if (error instanceof PaperStateError || error instanceof TypeError) {
+    response.status(400).json({ error: error.message });
+    return;
+  }
+  next(error);
+}
+
+function emptyCleanup() {
+  return { removed: [], rejected: [], missing: [] };
+}
+
+function appendCleanup(total, current) {
+  for (const key of ["removed", "rejected", "missing"]) {
+    total[key].push(...current[key]);
+  }
 }
 
 export function createApp(options = {}) {
@@ -314,6 +336,53 @@ export function createApp(options = {}) {
     );
   });
 
+  app.delete("/api/papers/:id", (request, response, next) => {
+    try {
+      response.json(repo.trashPaper(Number(request.params.id)));
+    } catch (error) {
+      respondToPaperStateError(error, response, next);
+    }
+  });
+
+  app.get("/api/trash", (_request, response) => {
+    response.json(repo.listTrashedPapers());
+  });
+
+  app.post("/api/trash/:id/restore", (request, response, next) => {
+    try {
+      response.json(repo.restorePaper(Number(request.params.id)));
+    } catch (error) {
+      respondToPaperStateError(error, response, next);
+    }
+  });
+
+  app.delete("/api/trash/:id", (request, response, next) => {
+    try {
+      requirePurgeConfirmation(request.body || {});
+      const purged = repo.purgePaper(Number(request.params.id));
+      const cleanup = removeLibraryFiles(config.filesDir, purged.storedPaths);
+      response.json({ paper: purged.paper, cleanup });
+    } catch (error) {
+      respondToPaperStateError(error, response, next);
+    }
+  });
+
+  app.delete("/api/trash", (request, response, next) => {
+    try {
+      requirePurgeConfirmation(request.body || {});
+      const cleanup = emptyCleanup();
+      const purged = [];
+      for (const paper of repo.listTrashedPapers()) {
+        const result = repo.purgePaper(paper.id);
+        purged.push(result.paper);
+        appendCleanup(cleanup, removeLibraryFiles(config.filesDir, result.storedPaths));
+      }
+      response.json({ papers: purged, cleanup });
+    } catch (error) {
+      respondToPaperStateError(error, response, next);
+    }
+  });
+
   app.patch("/api/papers/:id", (request, response, next) => {
     try {
       updatePaperResponse(repo, request, response, metadataFields);
@@ -388,7 +457,7 @@ export function createApp(options = {}) {
         return;
       }
 
-      const pdfPath = resolveStoredPdfPath(config.filesDir, paper.storedPath);
+      const pdfPath = resolveLibraryPdf(config.filesDir, paper.storedPath);
       if (!pdfPath || !existsSync(pdfPath)) {
         response.status(404).json({ error: "Source PDF not found" });
         return;

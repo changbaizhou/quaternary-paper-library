@@ -137,6 +137,20 @@ export class VersionConflictError extends Error {
   }
 }
 
+export class PaperNotFoundError extends Error {
+  constructor() {
+    super("Paper not found");
+    this.name = "PaperNotFoundError";
+  }
+}
+
+export class PaperStateError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "PaperStateError";
+  }
+}
+
 function normalizePageNumber(value) {
   if (value === null) return null;
   const page = Number(value);
@@ -222,6 +236,12 @@ export class PaperRepository {
         toJson(input.duplicateCandidates, []),
         input.extractedText || ""
       );
+      if (input.storedPath) {
+        db.prepare(`
+          INSERT INTO paper_files (draft_id, stored_filename, stored_path, sha256)
+          VALUES (?, ?, ?, ?)
+        `).run(Number(result.lastInsertRowid), input.storedFilename || "", input.storedPath, input.fileSha256 || "");
+      }
       return Number(result.lastInsertRowid);
     });
   }
@@ -326,6 +346,26 @@ export class PaperRepository {
           searchText
         );
 
+      const fileRow = db.prepare("SELECT id FROM paper_files WHERE draft_id = ?").get(id);
+      if (fileRow) {
+        db.prepare(`
+          UPDATE paper_files
+          SET paper_id = ?, draft_id = NULL, stored_filename = ?, stored_path = ?, sha256 = ?, status = 'active'
+          WHERE id = ?
+        `).run(
+          Number(result.lastInsertRowid),
+          paper.storedFilename,
+          paper.storedPath,
+          paper.fileSha256,
+          fileRow.id
+        );
+      } else if (paper.storedPath) {
+        db.prepare(`
+          INSERT INTO paper_files (paper_id, stored_filename, stored_path, sha256)
+          VALUES (?, ?, ?, ?)
+        `).run(Number(result.lastInsertRowid), paper.storedFilename, paper.storedPath, paper.fileSha256);
+      }
+
       db.prepare("UPDATE drafts SET status = 'confirmed' WHERE id = ?").run(id);
       return Number(result.lastInsertRowid);
     });
@@ -414,9 +454,131 @@ export class PaperRepository {
     });
   }
 
+  trashPaper(id) {
+    return this.withDb((db) => {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const current = db.prepare("SELECT * FROM papers WHERE id = ?").get(id);
+        if (!current) throw new PaperNotFoundError();
+        if (current.deleted_at !== null) {
+          throw new PaperStateError("Paper is already in trash");
+        }
+        if (current.merged_into_id !== null) {
+          throw new PaperStateError("Merged paper cannot be moved to trash");
+        }
+
+        db.prepare(`
+          UPDATE papers
+          SET deleted_at = CURRENT_TIMESTAMP, version = version + 1, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND deleted_at IS NULL AND merged_into_id IS NULL
+        `).run(id);
+        db.prepare("UPDATE paper_files SET status = 'trash' WHERE paper_id = ?").run(id);
+
+        const trashed = mapPaper(db.prepare("SELECT * FROM papers WHERE id = ?").get(id));
+        db.exec("COMMIT");
+        return trashed;
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    });
+  }
+
+  listTrashedPapers() {
+    return this.withDb((db) =>
+      db
+        .prepare(`
+          SELECT * FROM papers
+          WHERE deleted_at IS NOT NULL AND merged_into_id IS NULL
+          ORDER BY deleted_at DESC, id DESC
+        `)
+        .all()
+        .map(mapPaper)
+    );
+  }
+
+  restorePaper(id) {
+    return this.withDb((db) => {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const current = db.prepare("SELECT * FROM papers WHERE id = ?").get(id);
+        if (!current) throw new PaperNotFoundError();
+        if (current.deleted_at === null) {
+          throw new PaperStateError("Paper is not in trash");
+        }
+        if (current.merged_into_id !== null) {
+          throw new PaperStateError("Merged paper cannot be restored");
+        }
+
+        db.prepare(`
+          UPDATE papers
+          SET deleted_at = NULL, version = version + 1, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND deleted_at IS NOT NULL AND merged_into_id IS NULL
+        `).run(id);
+        db.prepare("UPDATE paper_files SET status = 'active' WHERE paper_id = ?").run(id);
+
+        const restored = mapPaper(db.prepare("SELECT * FROM papers WHERE id = ?").get(id));
+        db.exec("COMMIT");
+        return restored;
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    });
+  }
+
+  purgePaper(id) {
+    return this.withDb((db) => {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const current = db.prepare("SELECT * FROM papers WHERE id = ?").get(id);
+        if (!current) throw new PaperNotFoundError();
+        if (current.deleted_at === null) {
+          throw new PaperStateError("Paper must be in trash before purge");
+        }
+
+        const paper = mapPaper(current);
+        const storedPaths = [
+          ...db
+            .prepare("SELECT stored_path FROM paper_files WHERE paper_id = ? AND stored_path <> ''")
+            .all(id)
+            .map((row) => row.stored_path),
+          paper.storedPath
+        ].filter(Boolean);
+
+        db.prepare("DELETE FROM paper_files WHERE paper_id = ? OR draft_id = ?").run(id, paper.sourceDraftId);
+        db.prepare("DELETE FROM papers WHERE id = ? AND deleted_at IS NOT NULL").run(id);
+
+        const referencedPaths = new Set([
+          ...db
+            .prepare("SELECT stored_path FROM papers WHERE stored_path <> ''")
+            .all()
+            .map((row) => row.stored_path),
+          ...db
+            .prepare("SELECT stored_path FROM paper_files WHERE stored_path <> ''")
+            .all()
+            .map((row) => row.stored_path)
+        ]);
+        const safeStoredPaths = [...new Set(storedPaths)].filter((storedPath) => !referencedPaths.has(storedPath));
+
+        db.exec("COMMIT");
+        return { paper, storedPaths: safeStoredPaths };
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    });
+  }
+
   searchPapers({ query = "", filters = {} } = {}) {
     return this.withDb((db) => {
-      const rows = db.prepare("SELECT * FROM papers ORDER BY updated_at DESC, id DESC").all();
+      const rows = db
+        .prepare(`
+          SELECT * FROM papers
+          WHERE deleted_at IS NULL AND merged_into_id IS NULL
+          ORDER BY updated_at DESC, id DESC
+        `)
+        .all();
       const needle = String(query || "").trim().toLowerCase();
 
       return rows
