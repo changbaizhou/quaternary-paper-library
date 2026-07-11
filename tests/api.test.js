@@ -106,6 +106,17 @@ test("API edits confirmed paper metadata and notes with conflict protection", as
     assert.equal(unchanged.version, paper.version);
     assert.equal(unchanged.updatedAt, paper.updatedAt);
 
+    const emptyNotesResponse = await fetch(`${baseUrl}/api/papers/${paper.id}/notes`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expectedVersion: paper.version })
+    });
+    assert.equal(emptyNotesResponse.status, 400);
+    const papersAfterEmptyNotes = await (await fetch(`${baseUrl}/api/papers`)).json();
+    const unchangedAfterEmptyNotes = papersAfterEmptyNotes.find((item) => item.id === paper.id);
+    assert.equal(unchangedAfterEmptyNotes.version, paper.version);
+    assert.equal(unchangedAfterEmptyNotes.updatedAt, paper.updatedAt);
+
     const editResponse = await fetch(`${baseUrl}/api/papers/${paper.id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
