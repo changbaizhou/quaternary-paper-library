@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import vm from "node:vm";
 import { readFile } from "node:fs/promises";
 
 test("main paper panel contains list and PDF reader views", async () => {
@@ -192,7 +193,7 @@ test("closing the reader force-flushes progress and reports failures", async () 
   assert.match(closeReader, /await flushReadingProgress\(\{\s*force:\s*true/);
   assert.match(closeReader, /progressSaveResult/);
   assert.match(script, /阅读进度未保存/);
-  assert.match(script, /progressSavePromise\s*=\s*request\.then\([\s\S]*\(error\)\s*=>\s*\(\{\s*error\s*\}\)/);
+  assert.match(script, /progressSavePromise\s*=\s*request\.then\([\s\S]*\(error\)\s*=>\s*\(\{\s*error,\s*sentProgress:\s*progress\s*\}\)/);
 });
 
 test("409 recovery loads an unfiltered paper snapshot before refreshing the list", async () => {
@@ -203,4 +204,17 @@ test("409 recovery loads an unfiltered paper snapshot before refreshing the list
   assert.match(script, /const latestPaper = allPapers\.find/);
   assert.match(script, /await loadPapers\(\)/);
   assert.match(script, /论文冲突恢复失败：未找到当前论文/);
+});
+
+test("failed reading progress is requeued with newer pending values winning", async () => {
+  const script = await readFile("public/app.js", "utf8");
+  const helper = script.match(/function requeueReadingProgress\([\s\S]*?\n}\n/);
+
+  assert.ok(helper, "reading progress requeue helper is required");
+  const context = {};
+  vm.runInNewContext(
+    `${helper[0]}\nresult = requeueReadingProgress({ lastReadPage: 4, bookmarkPage: 2 }, { lastReadPage: 9 });`,
+    context
+  );
+  assert.equal(JSON.stringify(context.result), JSON.stringify({ lastReadPage: 9, bookmarkPage: 2 }));
 });

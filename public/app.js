@@ -183,6 +183,10 @@ function clearReadingProgressQueue() {
   state.reader.pendingProgress = null;
 }
 
+function requeueReadingProgress(sentProgress, pendingProgress = {}) {
+  return { ...sentProgress, ...(pendingProgress || {}) };
+}
+
 function setDetailFormLocked(locked) {
   for (const control of detailEditableControls) control.disabled = locked;
   saveElements.button.disabled = locked;
@@ -395,8 +399,8 @@ async function flushReadingProgress({ reportErrors = false, force = false } = {}
   if (state.reader.progressSavePromise) {
     const outcome = await state.reader.progressSavePromise;
     if (outcome.error) {
+      state.reader.pendingProgress = requeueReadingProgress(outcome.sentProgress, state.reader.pendingProgress);
       if (reportErrors) setStatus(outcome.error.message);
-      if (state.reader.pendingProgress) return flushReadingProgress({ reportErrors, force: true });
       return false;
     }
     if (state.reader.pendingProgress) return flushReadingProgress({ reportErrors, force: true });
@@ -412,16 +416,14 @@ async function flushReadingProgress({ reportErrors = false, force = false } = {}
     body: JSON.stringify(progress)
   });
   state.reader.progressSavePromise = request.then(
-    (updatedPaper) => ({ updatedPaper }),
-    (error) => ({ error })
+    (updatedPaper) => ({ updatedPaper, sentProgress: progress }),
+    (error) => ({ error, sentProgress: progress })
   );
   const outcome = await state.reader.progressSavePromise;
   state.reader.progressSavePromise = null;
   if (outcome.error) {
+    state.reader.pendingProgress = requeueReadingProgress(outcome.sentProgress, state.reader.pendingProgress);
     if (reportErrors) setStatus(outcome.error.message);
-    if (state.reader.pendingProgress && state.reader.paperId === paperId) {
-      return flushReadingProgress({ reportErrors, force: true });
-    }
     return false;
   }
   const updatedPaper = outcome.updatedPaper;
