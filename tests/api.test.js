@@ -365,6 +365,146 @@ test("API returns 404 when a confirmed paper has no source file", async () => {
   });
 });
 
+test("API detects exact and DOI duplicates while allowing separate confirmation", async () => {
+  await withServer(
+    async (baseUrl) => {
+      const upload = async (bytes, filename) => {
+        const form = new FormData();
+        form.append("files", new Blob([bytes], { type: "application/pdf" }), filename);
+        const response = await fetch(`${baseUrl}/api/uploads`, { method: "POST", body: form });
+        assert.equal(response.status, 201);
+        return (await response.json())[0];
+      };
+
+      const first = await upload("%PDF-1.4\nfirst\n%%EOF", "first.pdf");
+      const firstConfirm = await fetch(`${baseUrl}/api/drafts/${first.id}/confirm`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title: first.title })
+      });
+      assert.equal(firstConfirm.status, 201);
+
+      const sameBytes = await upload("%PDF-1.4\nfirst\n%%EOF", "same.pdf");
+      assert.equal(sameBytes.duplicateCandidates[0].reason, "sha256");
+      assert.equal(sameBytes.duplicateCandidates[0].score, 1);
+      const sameConfirm = await fetch(`${baseUrl}/api/drafts/${sameBytes.id}/confirm`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title: sameBytes.title })
+      });
+      assert.equal(sameConfirm.status, 201);
+
+      const differentBytes = await upload("%PDF-1.4\nsecond\n%%EOF", "different.pdf");
+      assert.equal(differentBytes.duplicateCandidates[0].reason, "doi");
+      assert.equal(differentBytes.duplicateCandidates[0].score, 1);
+
+      const papers = await (await fetch(`${baseUrl}/api/papers`)).json();
+      assert.equal(papers.length, 2);
+    },
+    {
+      enableUploadLookup: false,
+      extractPdfText: async () => `
+        Holocene lake sediment record
+        DOI: 10.1000/duplicate.
+        Abstract
+        A duplicate detection test paper.
+        Year: 2020
+      `
+    }
+  );
+});
+
+test("API scans only safe active PDF files and returns duplicate groups", async () => {
+  await withServer(async (baseUrl, { dbPath, filesDir, dir }) => {
+    const insidePath = path.join(filesDir, "2026", "scan.pdf");
+    const outsidePath = path.join(dir, "outside.pdf");
+    await mkdir(path.dirname(insidePath), { recursive: true });
+    await writeFile(insidePath, "%PDF-1.4\nscan\n%%EOF");
+    await writeFile(outsidePath, "%PDF-1.4\noutside\n%%EOF");
+
+    const repo = new PaperRepository(dbPath);
+    const insideDraft = repo.createDraft({
+      storedPath: insidePath,
+      storedFilename: "scan.pdf",
+      doi: "10.1000/scan",
+      title: "Scanned paper",
+      year: 2020,
+      classification: {},
+      confidence: {},
+      evidence: {}
+    });
+    const outsideDraft = repo.createDraft({
+      storedPath: outsidePath,
+      storedFilename: "outside.pdf",
+      doi: "10.1000/outside",
+      title: "Outside paper",
+      year: 2020,
+      classification: {},
+      confidence: {},
+      evidence: {}
+    });
+    const insidePaperId = repo.confirmDraft(insideDraft);
+    const outsidePaperId = repo.confirmDraft(outsideDraft);
+
+    const scanResponse = await fetch(`${baseUrl}/api/duplicates/scan`, { method: "POST" });
+    assert.equal(scanResponse.status, 200);
+    const scan = await scanResponse.json();
+    assert.ok(scan.scanned.includes("2026/scan.pdf"));
+    assert.equal(scan.rejected.length, 1);
+    assert.equal(JSON.stringify(scan).includes(dir), false);
+    assert.equal(scan.groups.sha256.length, 0);
+
+    const db = openDb(dbPath);
+    try {
+      assert.equal(db.prepare("SELECT file_sha256 FROM papers WHERE id = ?").get(insidePaperId).file_sha256,
+        "cc446fe332e4e71dc69b9a448bfdebd952ec396489a6edebe4665eea448ad985");
+      assert.equal(db.prepare("SELECT file_sha256 FROM papers WHERE id = ?").get(outsidePaperId).file_sha256, "");
+    } finally {
+      db.close();
+    }
+
+    const latestResponse = await fetch(`${baseUrl}/api/duplicates`);
+    assert.equal(latestResponse.status, 200);
+    const latest = await latestResponse.json();
+    assert.deepEqual(latest.groups, scan.groups);
+  });
+});
+
+test("API abandons only confirmed pending draft deletions and cleans safe files", async () => {
+  await withServer(async (baseUrl, { filesDir }) => {
+    const storedPath = path.join(filesDir, "2026", "abandon.pdf");
+    await mkdir(path.dirname(storedPath), { recursive: true });
+    await writeFile(storedPath, "%PDF-1.4\nabandon\n%%EOF");
+
+    const repo = new PaperRepository(path.join(path.dirname(filesDir), "library.sqlite"));
+    const pendingId = repo.createDraft({ storedPath, storedFilename: "abandon.pdf", title: "Abandon me" });
+    const confirmedId = repo.createDraft({ title: "Keep me" });
+    repo.confirmDraft(confirmedId);
+
+    const missingConfirm = await fetch(`${baseUrl}/api/drafts/${pendingId}`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({})
+    });
+    assert.equal(missingConfirm.status, 400);
+
+    const deleted = await fetch(`${baseUrl}/api/drafts/${pendingId}`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ confirm: true })
+    });
+    assert.equal(deleted.status, 200);
+    await assert.rejects(access(storedPath));
+
+    const protectedDelete = await fetch(`${baseUrl}/api/drafts/${confirmedId}`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ confirm: true })
+    });
+    assert.equal(protectedDelete.status, 409);
+  });
+});
+
 test("API trashes, restores, and purges a paper with explicit confirmation", async () => {
   await withServer(
     async (baseUrl) => {

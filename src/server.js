@@ -1,6 +1,7 @@
 import express from "express";
 import multer from "multer";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -10,6 +11,7 @@ import { exportBibtex, exportCsv, exportMarkdown } from "./exporters.js";
 import { lookupDoiMetadata, lookupTitleMetadata } from "./metadata.js";
 import { extractOcrText as defaultExtractOcrText } from "./ocr.js";
 import { metadataFields, noteFields } from "./paperData.js";
+import { fingerprintBuffer } from "./duplicates.js";
 import { removeLibraryFiles, resolveLibraryPdf } from "./fileStorage.js";
 import {
   detectDoi,
@@ -29,6 +31,7 @@ import {
   PaperNotFoundError,
   PaperRepository,
   PaperStateError,
+  DraftNotFoundError,
   VersionConflictError
 } from "./repository.js";
 import { classifyText } from "./taxonomy.js";
@@ -162,6 +165,7 @@ async function createDraftFromText({
   filename,
   storedFilename = "",
   storedPath = "",
+  fileSha256 = "",
   enableLookup = false
 }) {
   const doi = detectDoi(text);
@@ -193,12 +197,20 @@ async function createDraftFromText({
     keywords: metadata.authorKeywords,
     text
   });
+  const duplicateCandidates = repo.findDuplicatePapers({
+    sha256: fileSha256,
+    doi: metadata.doi,
+    title: metadata.title,
+    year: metadata.year
+  });
 
   const draftId = repo.createDraft({
     originalFilename: filename,
     storedFilename,
     storedPath,
+    fileSha256,
     ...metadata,
+    duplicateCandidates,
     suggestedKeywords: [
       ...classificationResult.classification.themes,
       ...classificationResult.classification.methods,
@@ -237,11 +249,20 @@ function respondToPaperStateError(error, response, next) {
     response.status(409).json({ error: error.message });
     return;
   }
+  if (error instanceof DraftNotFoundError) {
+    response.status(404).json({ error: error.message });
+    return;
+  }
   if (error instanceof TypeError) {
     response.status(400).json({ error: error.message });
     return;
   }
   next(error);
+}
+
+function scanPathLabel(filesDir, resolvedPath, storedPath) {
+  if (resolvedPath) return path.relative(filesDir, resolvedPath).split(path.sep).join("/");
+  return path.basename(String(storedPath || "").replace(/[\\/]+$/, "")) || "rejected";
 }
 
 function emptyCleanup() {
@@ -305,6 +326,7 @@ export function createApp(options = {}) {
       mkdirSync(targetDir, { recursive: true });
 
       for (const file of request.files || []) {
+        const fileSha256 = fingerprintBuffer(file.buffer);
         const decodedOriginalName = decodePossiblyMojibakeFilename(file.originalname);
         const extension = path.extname(decodedOriginalName) || ".pdf";
         const storedFilename = `${Date.now()}-${slugify(path.basename(decodedOriginalName, extension))}${extension}`;
@@ -323,6 +345,7 @@ export function createApp(options = {}) {
           filename: decodedOriginalName,
           storedFilename,
           storedPath: path.relative(process.cwd(), targetPath),
+          fileSha256,
           enableLookup: enableUploadLookup
         });
         drafts.push(draft);
@@ -336,6 +359,21 @@ export function createApp(options = {}) {
 
   app.get("/api/drafts", (_request, response) => {
     response.json(repo.listPendingDrafts());
+  });
+
+  app.delete("/api/drafts/:id", (request, response, next) => {
+    try {
+      requirePurgeConfirmation(request.body || {});
+      const deleted = repo.deletePendingDraft(Number(request.params.id));
+      const cleanup = removeLibraryFiles(
+        config.filesDir,
+        deleted.storedPaths,
+        deleted.protectedStoredPaths
+      );
+      response.json({ cleanup });
+    } catch (error) {
+      respondToPaperStateError(error, response, next);
+    }
   });
 
   app.post("/api/drafts/:id/confirm", (request, response, next) => {
@@ -354,6 +392,44 @@ export function createApp(options = {}) {
         filters: parseFilters(request.query)
       })
     );
+  });
+
+  app.get("/api/duplicates", (_request, response) => {
+    response.json({ groups: repo.listDuplicateGroups() });
+  });
+
+  app.post("/api/duplicates/scan", async (_request, response, next) => {
+    try {
+      const scanned = [];
+      const missing = [];
+      const rejected = [];
+      const failed = [];
+      for (const file of repo.listActivePaperFilesMissingHashes()) {
+        const resolvedPath = resolveLibraryPdf(config.filesDir, file.stored_path);
+        const label = scanPathLabel(config.filesDir, resolvedPath, file.stored_path);
+        if (!resolvedPath) {
+          rejected.push(label);
+          continue;
+        }
+        try {
+          const buffer = await readFile(resolvedPath);
+          repo.updatePaperFileHash(file.id, fingerprintBuffer(buffer));
+          scanned.push(label);
+        } catch (error) {
+          if (error.code === "ENOENT") missing.push(label);
+          else failed.push(label);
+        }
+      }
+      response.json({
+        groups: repo.listDuplicateGroups(),
+        scanned,
+        missing,
+        rejected,
+        failed
+      });
+    } catch (error) {
+      next(error);
+    }
   });
 
   app.delete("/api/papers/:id", (request, response, next) => {

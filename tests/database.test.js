@@ -73,7 +73,7 @@ test("initDb creates a missing nested database parent before locking", async () 
     const db = openDb(dbPath);
     const versions = db.prepare("SELECT version FROM schema_migrations").all();
     db.close();
-    assert.deepEqual(versions.map((item) => item.version), [1]);
+    assert.deepEqual(versions.map((item) => item.version), [1, 2]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -149,7 +149,7 @@ test("initDb waits for an existing proper-lockfile lock", async () => {
     const migrated = openDb(dbPath);
     const versions = migrated.prepare("SELECT version FROM schema_migrations").all();
     migrated.close();
-    assert.deepEqual(versions.map((item) => item.version), [1]);
+    assert.deepEqual(versions.map((item) => item.version), [1, 2]);
   } finally {
     release?.();
     await rm(dir, { recursive: true, force: true });
@@ -186,7 +186,7 @@ test("lock worker cleans up after acquisition failure", async () => {
     const migrated = openDb(dbPath);
     const versions = migrated.prepare("SELECT version FROM schema_migrations").all();
     migrated.close();
-    assert.deepEqual(versions.map((item) => item.version), [1]);
+    assert.deepEqual(versions.map((item) => item.version), [1, 2]);
   } finally {
     release?.();
     await rm(dir, { recursive: true, force: true });
@@ -220,7 +220,7 @@ test("lock worker times out acquisition and leaves no owned lock", async () => {
     const migrated = openDb(dbPath);
     const versions = migrated.prepare("SELECT version FROM schema_migrations").all();
     migrated.close();
-    assert.deepEqual(versions.map((item) => item.version), [1]);
+    assert.deepEqual(versions.map((item) => item.version), [1, 2]);
   } finally {
     release?.();
     await rm(dir, { recursive: true, force: true });
@@ -263,7 +263,7 @@ test("compromised worker lock fails safely and permits retry", async () => {
     const migrated = openDb(dbPath);
     const versions = migrated.prepare("SELECT version FROM schema_migrations").all();
     migrated.close();
-    assert.deepEqual(versions.map((item) => item.version), [1]);
+    assert.deepEqual(versions.map((item) => item.version), [1, 2]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -291,7 +291,7 @@ test("initDb reclaims a stale proper-lockfile lock", async () => {
     const migrated = openDb(dbPath);
     const versions = migrated.prepare("SELECT version FROM schema_migrations").all();
     migrated.close();
-    assert.deepEqual(versions.map((item) => item.version), [1]);
+    assert.deepEqual(versions.map((item) => item.version), [1, 2]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -303,7 +303,12 @@ test("initDb runs versioned migrations without losing existing papers", async ()
   try {
     initDb(dbPath);
     const before = openDb(dbPath);
-    before.prepare("INSERT INTO papers (title, search_text) VALUES (?, ?)").run("Legacy paper", "legacy paper");
+    before.prepare("INSERT INTO papers (doi, title, search_text) VALUES (?, ?, ?)").run(
+      "https://doi.org/10.1000/LEGACY.",
+      "The Legacy–Paper Record",
+      "legacy paper"
+    );
+    before.prepare("DELETE FROM schema_migrations WHERE version = 2").run();
     before.close();
 
     initDb(dbPath);
@@ -315,20 +320,24 @@ test("initDb runs versioned migrations without losing existing papers", async ()
     try {
       migrations = after.prepare("SELECT version FROM schema_migrations ORDER BY version").all();
       columns = after.prepare("PRAGMA table_info(papers)").all().map((item) => item.name);
-      paper = after.prepare("SELECT title, version, deleted_at FROM papers WHERE title = ?").get("Legacy paper");
+      paper = after.prepare(
+        "SELECT title, version, deleted_at, normalized_doi, normalized_title FROM papers WHERE doi = ?"
+      ).get("https://doi.org/10.1000/LEGACY.");
       tables = after.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((item) => item.name);
     } finally {
       after.close();
     }
 
-    assert.deepEqual(migrations.map((item) => item.version), [1]);
+    assert.deepEqual(migrations.map((item) => item.version), [1, 2]);
     assert.ok(columns.includes("normalized_doi"));
     assert.ok(columns.includes("normalized_title"));
     assert.ok(columns.includes("file_sha256"));
     assert.ok(columns.includes("version"));
     assert.ok(columns.includes("deleted_at"));
     assert.ok(columns.includes("merged_into_id"));
-    assert.equal(paper.title, "Legacy paper");
+    assert.equal(paper.title, "The Legacy–Paper Record");
+    assert.equal(paper.normalized_doi, "10.1000/legacy");
+    assert.equal(paper.normalized_title, "legacy paper record");
     assert.equal(paper.version, 1);
     assert.equal(paper.deleted_at, null);
     assert.ok(tables.includes("paper_files"));
@@ -405,7 +414,7 @@ test("initDb snapshots and fully migrates pre-v1 file records exactly once", asy
     const migratedPaper = migrated.prepare("SELECT title, version FROM papers").get();
     migrated.close();
 
-    assert.deepEqual(versions.map((item) => item.version), [1]);
+    assert.deepEqual(versions.map((item) => item.version), [1, 2]);
     for (const column of ["normalized_doi", "normalized_title", "file_sha256", "version", "deleted_at", "merged_into_id"]) {
       assert.ok(paperColumns.includes(column), `missing papers.${column}`);
     }
@@ -516,7 +525,7 @@ test("initDb rolls back migration failure, releases its lock, and retries", asyn
     const retriedColumns = retried.prepare("PRAGMA table_info(papers)").all().map((item) => item.name);
     retried.close();
 
-    assert.deepEqual(retriedVersions.map((item) => item.version), [1]);
+    assert.deepEqual(retriedVersions.map((item) => item.version), [1, 2]);
     assert.ok(retriedColumns.includes("normalized_doi"));
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -559,7 +568,7 @@ test("initDb serializes concurrent initialization across processes", async () =>
     db.close();
 
     assert.equal(snapshots.length, 1);
-    assert.deepEqual(versions.map((item) => item.version), [1]);
+    assert.deepEqual(versions.map((item) => item.version), [1, 2]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -602,7 +611,7 @@ test("initDb remains serialized across repeated concurrent initialization rounds
       migrated.close();
 
       assert.equal(snapshots.length, 1);
-      assert.deepEqual(versions.map((item) => item.version), [1]);
+      assert.deepEqual(versions.map((item) => item.version), [1, 2]);
     }
   } finally {
     await rm(dir, { recursive: true, force: true });

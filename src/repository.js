@@ -1,5 +1,6 @@
 import { openDb } from "./database.js";
-import { metadataFields, normalizeDoi, normalizeTitle, noteFields } from "./paperData.js";
+import { metadataFields, noteFields } from "./paperData.js";
+import { normalizeDoi, normalizeTitle, titleSimilarity } from "./duplicates.js";
 
 const draftJsonFields = {
   authors: "authors_json",
@@ -152,6 +153,13 @@ export class PaperStateError extends Error {
   }
 }
 
+export class DraftNotFoundError extends Error {
+  constructor() {
+    super("Draft not found");
+    this.name = "DraftNotFoundError";
+  }
+}
+
 function normalizePageNumber(value) {
   if (value === null) return null;
   const page = Number(value);
@@ -163,6 +171,95 @@ function normalizePageNumber(value) {
 
 function mergeUnique(...lists) {
   return [...new Set(lists.flat().filter(Boolean))];
+}
+
+const duplicateReasonOrder = ["sha256", "doi", "title"];
+
+function activePaperRows(db) {
+  return db.prepare(`
+    SELECT * FROM papers
+    WHERE deleted_at IS NULL AND merged_into_id IS NULL
+    ORDER BY id ASC
+  `).all();
+}
+
+function paperHashMap(db) {
+  const hashes = new Map();
+  for (const row of db.prepare(`
+    SELECT paper_id, sha256
+    FROM paper_files
+    WHERE paper_id IS NOT NULL AND status = 'active' AND sha256 <> ''
+    ORDER BY id ASC
+  `).all()) {
+    if (!hashes.has(row.paper_id)) hashes.set(row.paper_id, new Set());
+    hashes.get(row.paper_id).add(row.sha256);
+  }
+  for (const row of activePaperRows(db)) {
+    if (!hashes.has(row.id)) hashes.set(row.id, new Set());
+    if (row.file_sha256) hashes.get(row.id).add(row.file_sha256);
+  }
+  return hashes;
+}
+
+function compactCandidate(row, reason, score) {
+  return {
+    paperId: row.id,
+    reason,
+    score,
+    title: row.title,
+    year: row.year,
+    doi: row.doi
+  };
+}
+
+function findDuplicateCandidates(db, input = {}) {
+  const sha256 = String(input.sha256 || "").trim();
+  const doi = normalizeDoi(input.doi);
+  const title = normalizeTitle(input.title);
+  const year = input.year === null || input.year === undefined || input.year === ""
+    ? null
+    : Number(input.year);
+  const hashes = paperHashMap(db);
+  const candidates = [];
+
+  for (const row of activePaperRows(db)) {
+    if (input.excludePaperId !== undefined && Number(input.excludePaperId) === row.id) continue;
+    const rowDoi = row.normalized_doi || normalizeDoi(row.doi);
+    const rowTitle = row.normalized_title || normalizeTitle(row.title);
+    let candidate = null;
+    if (sha256 && hashes.get(row.id)?.has(sha256)) {
+      candidate = compactCandidate(row, "sha256", 1);
+    } else if (doi && rowDoi && doi === rowDoi) {
+      candidate = compactCandidate(row, "doi", 1);
+    } else if (title && rowTitle) {
+      const score = titleSimilarity(title, rowTitle);
+      const matchingYear = year === null || row.year === null || year === row.year;
+      if (score >= 0.92 && matchingYear) candidate = compactCandidate(row, "title", score);
+    }
+    if (candidate) candidates.push(candidate);
+  }
+
+  return candidates.sort((left, right) =>
+    duplicateReasonOrder.indexOf(left.reason) - duplicateReasonOrder.indexOf(right.reason) ||
+    right.score - left.score ||
+    left.paperId - right.paperId
+  );
+}
+
+function duplicateGroups(db) {
+  const groups = { sha256: [], doi: [], title: [] };
+  for (const row of activePaperRows(db)) {
+    for (const candidate of findDuplicateCandidates(db, {
+      sha256: row.file_sha256,
+      doi: row.doi,
+      title: row.title,
+      year: row.year,
+      excludePaperId: row.id
+    })) {
+      groups[candidate.reason].push({ sourcePaperId: row.id, ...candidate });
+    }
+  }
+  return groups;
 }
 
 function makeSearchText(paper) {
@@ -265,6 +362,87 @@ export class PaperRepository {
 
   getDraft(id) {
     return this.withDb((db) => mapDraft(db.prepare("SELECT * FROM drafts WHERE id = ?").get(id)));
+  }
+
+  findDuplicatePapers(input = {}) {
+    return this.withDb((db) => findDuplicateCandidates(db, input));
+  }
+
+  listDuplicateGroups() {
+    return this.withDb((db) => duplicateGroups(db));
+  }
+
+  listActivePaperFilesMissingHashes() {
+    return this.withDb((db) => db.prepare(`
+      SELECT id, paper_id, stored_path
+      FROM paper_files
+      WHERE paper_id IS NOT NULL AND status = 'active' AND (sha256 IS NULL OR sha256 = '')
+      ORDER BY id ASC
+    `).all());
+  }
+
+  updatePaperFileHash(fileId, sha256) {
+    return this.withDb((db) => {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const file = db.prepare(
+          "SELECT id, paper_id FROM paper_files WHERE id = ? AND paper_id IS NOT NULL AND status = 'active'"
+        ).get(fileId);
+        if (!file) {
+          db.exec("ROLLBACK");
+          return false;
+        }
+        db.prepare("UPDATE paper_files SET sha256 = ? WHERE id = ?").run(sha256, file.id);
+        db.prepare(`
+          UPDATE papers
+          SET file_sha256 = COALESCE((
+            SELECT sha256 FROM paper_files
+            WHERE paper_id = ? AND status = 'active' AND sha256 <> ''
+            ORDER BY id ASC LIMIT 1
+          ), '')
+          WHERE id = ?
+        `).run(file.paper_id, file.paper_id);
+        db.exec("COMMIT");
+        return true;
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    });
+  }
+
+  deletePendingDraft(id) {
+    return this.withDb((db) => {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const draft = db.prepare("SELECT * FROM drafts WHERE id = ?").get(id);
+        if (!draft) throw new DraftNotFoundError();
+        if (draft.status !== "pending") {
+          throw new PaperStateError("Only pending drafts can be deleted");
+        }
+
+        const storedPaths = [
+          draft.stored_path,
+          ...db.prepare(
+            "SELECT stored_path FROM paper_files WHERE draft_id = ? AND stored_path <> ''"
+          ).all(id).map((row) => row.stored_path)
+        ].filter(Boolean);
+        db.prepare("DELETE FROM paper_files WHERE draft_id = ?").run(id);
+        db.prepare("DELETE FROM drafts WHERE id = ? AND status = 'pending'").run(id);
+        const protectedStoredPaths = [
+          ...db.prepare("SELECT stored_path FROM papers WHERE stored_path <> ''").all().map((row) => row.stored_path),
+          ...db.prepare("SELECT stored_path FROM paper_files WHERE stored_path <> ''").all().map((row) => row.stored_path)
+        ];
+        db.exec("COMMIT");
+        return {
+          storedPaths: [...new Set(storedPaths)],
+          protectedStoredPaths: [...new Set(protectedStoredPaths)]
+        };
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    });
   }
 
   confirmDraft(id, overrides = {}) {

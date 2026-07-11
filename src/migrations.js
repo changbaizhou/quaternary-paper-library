@@ -1,3 +1,5 @@
+import { normalizeDoi, normalizeTitle } from "./duplicates.js";
+
 function tableExists(db, tableName) {
   return Boolean(
     db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(tableName)
@@ -130,6 +132,20 @@ const migrations = [
         WHERE stored_path <> ''
           AND NOT EXISTS (SELECT 1 FROM paper_files WHERE paper_files.draft_id = drafts.id);
       `);
+    }
+  },
+  {
+    version: 2,
+    up(db) {
+      const columns = new Set(db.prepare("PRAGMA table_info(papers)").all().map((column) => column.name));
+      const doiExpression = columns.has("doi") ? "doi" : "'' AS doi";
+      const titleExpression = columns.has("title") ? "title" : "'' AS title";
+      const update = db.prepare(
+        "UPDATE papers SET normalized_doi = ?, normalized_title = ? WHERE id = ?"
+      );
+      for (const paper of db.prepare(`SELECT id, ${doiExpression}, ${titleExpression} FROM papers`).all()) {
+        update.run(normalizeDoi(paper.doi), normalizeTitle(paper.title), paper.id);
+      }
     }
   }
 ];

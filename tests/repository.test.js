@@ -485,7 +485,7 @@ test("repository updates confirmed papers and rejects stale versions", async () 
         .get(paperId);
       assert.equal(row.search_text, "ａ study: café—研究! https://doi.org/10.1000/updated. the revised note is searchable.");
       assert.equal(row.normalized_doi, "10.1000/updated");
-      assert.equal(row.normalized_title, "a study café 研究");
+      assert.equal(row.normalized_title, "study café 研究");
     } finally {
       db.close();
     }
@@ -503,6 +503,77 @@ test("repository updates confirmed papers and rejects stale versions", async () 
       () => repo.updatePaper(paperId, { expectedVersion: 1, title: "Stale edit" }),
       (error) => error.name === "VersionConflictError"
     );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("repository ranks duplicate candidates by hash, DOI, then title", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-duplicates-"));
+  const dbPath = path.join(dir, "library.sqlite");
+
+  try {
+    initDb(dbPath);
+    const repo = new PaperRepository(dbPath);
+    const createPaper = (input) => repo.confirmDraft(repo.createDraft({
+      classification: {},
+      confidence: {},
+      evidence: {},
+      ...input
+    }));
+
+    const shaPaperId = createPaper({
+      fileSha256: "same-bytes",
+      doi: "10.1000/ABC",
+      title: "First paper",
+      year: 2020
+    });
+    const doiPaperId = createPaper({
+      fileSha256: "different-bytes",
+      doi: "https://doi.org/10.1000/ABC.",
+      title: "Different title",
+      year: 2019
+    });
+    const titlePaperId = createPaper({
+      fileSha256: "other-bytes",
+      doi: "10.1000/OTHER",
+      title: "The Holocene lake sediment record",
+      year: 2020
+    });
+
+    assert.deepEqual(
+      repo.findDuplicatePapers({
+        sha256: "same-bytes",
+        doi: "10.1000/ABC",
+        title: "A Holocene lake sediment record",
+        year: 2020
+      }),
+      [
+        { paperId: shaPaperId, reason: "sha256", score: 1, title: "First paper", year: 2020, doi: "10.1000/ABC" },
+        { paperId: doiPaperId, reason: "doi", score: 1, title: "Different title", year: 2019, doi: "https://doi.org/10.1000/ABC." },
+        { paperId: titlePaperId, reason: "title", score: 1, title: "The Holocene lake sediment record", year: 2020, doi: "10.1000/OTHER" }
+      ]
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("repository deletes only pending drafts and returns their cleanup paths", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-draft-delete-"));
+  const dbPath = path.join(dir, "library.sqlite");
+
+  try {
+    initDb(dbPath);
+    const repo = new PaperRepository(dbPath);
+    const pendingId = repo.createDraft({ storedPath: "2026/pending.pdf", title: "Pending" });
+    const confirmedId = repo.createDraft({ storedPath: "2026/confirmed.pdf", title: "Confirmed" });
+    repo.confirmDraft(confirmedId);
+
+    const deleted = repo.deletePendingDraft(pendingId);
+    assert.deepEqual(deleted.storedPaths, ["2026/pending.pdf"]);
+    assert.equal(repo.getDraft(pendingId), null);
+    assert.throws(() => repo.deletePendingDraft(confirmedId), /pending/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
