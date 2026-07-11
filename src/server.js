@@ -246,9 +246,15 @@ function appendCleanup(total, current) {
   }
 }
 
-function publicPurgedPaper(paper) {
-  const { storedPath, ...safePaper } = paper;
-  return safePaper;
+function publicPaper(paper) {
+  return {
+    id: paper.id,
+    title: paper.title,
+    year: paper.year,
+    deletedAt: paper.deletedAt,
+    version: paper.version,
+    status: paper.deletedAt ? "trash" : "active"
+  };
 }
 
 export function createApp(options = {}) {
@@ -343,19 +349,19 @@ export function createApp(options = {}) {
 
   app.delete("/api/papers/:id", (request, response, next) => {
     try {
-      response.json(repo.trashPaper(Number(request.params.id)));
+      response.json(publicPaper(repo.trashPaper(Number(request.params.id))));
     } catch (error) {
       respondToPaperStateError(error, response, next);
     }
   });
 
   app.get("/api/trash", (_request, response) => {
-    response.json(repo.listTrashedPapers());
+    response.json(repo.listTrashedPapers().map(publicPaper));
   });
 
   app.post("/api/trash/:id/restore", (request, response, next) => {
     try {
-      response.json(repo.restorePaper(Number(request.params.id)));
+      response.json(publicPaper(repo.restorePaper(Number(request.params.id))));
     } catch (error) {
       respondToPaperStateError(error, response, next);
     }
@@ -370,7 +376,7 @@ export function createApp(options = {}) {
         purged.storedPaths,
         purged.protectedStoredPaths
       );
-      response.json({ paper: publicPurgedPaper(purged.paper), cleanup });
+      response.json({ paper: publicPaper(purged.paper), cleanup });
     } catch (error) {
       respondToPaperStateError(error, response, next);
     }
@@ -383,7 +389,7 @@ export function createApp(options = {}) {
       const purged = [];
       for (const paper of repo.listTrashedPapers()) {
         const result = repo.purgePaper(paper.id);
-        purged.push(publicPurgedPaper(result.paper));
+        purged.push(publicPaper(result.paper));
         appendCleanup(
           cleanup,
           removeLibraryFiles(config.filesDir, result.storedPaths, result.protectedStoredPaths)

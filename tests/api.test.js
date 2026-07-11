@@ -499,6 +499,92 @@ test("API rejects symlink or junction traversal for reads and purge", async () =
   });
 });
 
+test("Task 4 responses omit absolute and internal paper storage fields", async () => {
+  await withServer(async (baseUrl, { dbPath, dir }) => {
+    const absoluteStoredPath = path.join(dir, "private", "absolute.pdf");
+    const secondStoredPath = path.join(dir, "private", "second.pdf");
+    const repo = new PaperRepository(dbPath);
+
+    const createPaper = (storedPath, title) => {
+      const draftId = repo.createDraft({
+        storedPath,
+        storedFilename: path.basename(storedPath),
+        fileSha256: "private-hash",
+        title,
+        year: 2026,
+        classification: {},
+        confidence: {},
+        evidence: {}
+      });
+      return repo.confirmDraft(draftId);
+    };
+    const firstPaperId = createPaper(absoluteStoredPath, "Private path paper");
+    const secondPaperId = createPaper(secondStoredPath, "Second private path paper");
+    const publicKeys = ["deletedAt", "id", "status", "title", "version", "year"].sort();
+
+    const assertPublicPaperBody = (body, expectedStatus) => {
+      assert.deepEqual(Object.keys(body).sort(), publicKeys);
+      assert.equal(body.status, expectedStatus);
+      assert.equal(JSON.stringify(body).includes(absoluteStoredPath), false);
+      return body;
+    };
+    const assertPublicPaper = async (response, expectedStatus) => {
+      assert.equal(response.status, 200);
+      return assertPublicPaperBody(await response.json(), expectedStatus);
+    };
+
+    await assertPublicPaper(
+      await fetch(`${baseUrl}/api/papers/${firstPaperId}`, { method: "DELETE" }),
+      "trash"
+    );
+    await assertPublicPaper(
+      await fetch(`${baseUrl}/api/papers/${secondPaperId}`, { method: "DELETE" }),
+      "trash"
+    );
+
+    const trashResponse = await fetch(`${baseUrl}/api/trash`);
+    assert.equal(trashResponse.status, 200);
+    const trashPapers = await trashResponse.json();
+    assert.equal(trashPapers.length, 2);
+    for (const paper of trashPapers) {
+      assert.deepEqual(Object.keys(paper).sort(), publicKeys);
+      assert.equal(paper.status, "trash");
+      assert.equal(JSON.stringify(paper).includes(absoluteStoredPath), false);
+    }
+
+    await assertPublicPaper(
+      await fetch(`${baseUrl}/api/trash/${firstPaperId}/restore`, { method: "POST" }),
+      "active"
+    );
+    await assertPublicPaper(
+      await fetch(`${baseUrl}/api/papers/${firstPaperId}`, { method: "DELETE" }),
+      "trash"
+    );
+
+    const individualPurgeResponse = await fetch(`${baseUrl}/api/trash/${firstPaperId}`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ confirm: true })
+    });
+    assert.equal(individualPurgeResponse.status, 200);
+    const individualPurgeBody = await individualPurgeResponse.json();
+    assertPublicPaperBody(individualPurgeBody.paper, "trash");
+    assert.equal(JSON.stringify(individualPurgeBody).includes(absoluteStoredPath), false);
+
+    const fullPurgeResponse = await fetch(`${baseUrl}/api/trash`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ confirm: true })
+    });
+    assert.equal(fullPurgeResponse.status, 200);
+    const fullPurgeBody = await fullPurgeResponse.json();
+    assert.equal(fullPurgeBody.papers.length, 1);
+    assert.deepEqual(Object.keys(fullPurgeBody.papers[0]).sort(), publicKeys);
+    assert.equal(fullPurgeBody.papers[0].status, "trash");
+    assert.equal(JSON.stringify(fullPurgeBody).includes(absoluteStoredPath), false);
+  });
+});
+
 test("API saves reading progress and exposes it in paper list", async () => {
   await withServer(async (baseUrl) => {
     const createResponse = await fetch(`${baseUrl}/api/drafts/from-text`, {
