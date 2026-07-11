@@ -13,6 +13,7 @@ test("Windows start script launches the local paper library", async () => {
   assert.match(script, /npm install/);
   assert.match(script, /npm start/);
   assert.match(script, /http:\/\/127\.0\.0\.1:8000/);
+  assert.doesNotMatch(script, /(?:AQ\.|sk-[A-Za-z0-9])/);
 });
 
 test("local environment batch file is documented but ignored", async () => {
@@ -22,5 +23,6 @@ test("local environment batch file is documented but ignored", async () => {
 
   assert.match(example, /QWEN_API_KEY=/);
   assert.match(example, /QPL_QWEN_BASE_URL=/);
+  assert.doesNotMatch(example, /(?:AQ\.|sk-[A-Za-z0-9]{16,})/);
   assert.match(gitignore, /^local\.env\.bat$/m);
 });

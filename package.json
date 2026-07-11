@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node src/server.js",
     "reprocess": "node scripts/reprocessLibrary.js",
-    "test": "node --test"
+    "test": "node --test",
+    "test:browser": "playwright test"
   },
   "dependencies": {
     "express": "^5.1.0",
@@ -14,5 +15,9 @@
     "pdf-parse": "^1.1.1",
     "pdfjs-dist": "^6.1.200",
     "proper-lockfile": "^4.1.2"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.54.1",
+    "pdf-lib": "^1.17.1"
   }
 }

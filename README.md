@@ -1,51 +1,59 @@
-# Quaternary Paper Library
+# 第四纪论文库
 
-本地优先的第四纪地质学论文管理网页系统。
+本地优先的第四纪地质学论文管理网页系统。维护账号：`changbaizhou`。
 
-维护账号：`changbaizhou`
+## 主要功能
 
-## 功能
+- 上传 PDF，并保存到本地 `library/files/`。
+- 自动提取 DOI、题名、作者、摘要和关键词；文本不足时可调用本机 OCR。
+- 按第四纪地质学词表推荐主题、区域、时期、材料、方法和指标。
+- 入库前人工确认识别结果，检测文件、DOI 和相似题名重复项。
+- 显式保存论文元数据；个人笔记停止输入约 800 毫秒后自动保存。
+- 连续滚动阅读 PDF，保存上次阅读页和每篇论文唯一书签。
+- 将论文移入回收站后恢复或彻底删除。
+- 创建数据库备份或包含 PDF 的完整备份，并在确认后恢复。
+- 导出 BibTeX、CSV 和 Markdown。
 
-- 上传 PDF，并复制到本地 `library/files/` 资料库。
-- 自动提取 DOI、题名、作者、摘要、关键词等信息。
-- PDF 文本抽取过少时，自动尝试本机 OCR。
-- 可联网通过 DOI 或题名补全文献信息。
-- 基于第四纪地质学词表自动推荐主题、区域、时期、材料、方法和指标。
-- 待确认后入库，避免自动识别误差直接污染资料库。
-- 支持题名、作者、摘要、分类和笔记检索。
-- 支持导出 BibTeX、CSV、Markdown。
+## 启动
 
-## 运行
-
-Windows 可以直接双击：
+Windows 可直接双击：
 
 ```text
 启动论文库.bat
 ```
 
-第一次启用翻译前，先复制 `local.env.example.bat` 为 `local.env.bat`，把自己的 Qwen API Key 和百炼 OpenAI 兼容地址填进去。`local.env.bat` 只保存在本机，不会提交到 GitHub。
-
 也可以手动启动：
 
-```bash
+```powershell
 npm install
 npm start
 ```
 
-打开：
+然后打开 `http://127.0.0.1:8000`。
+
+## 日常使用
+
+上传 PDF 后先检查待确认草稿。系统发现重复项时只显示警告，不会自动合并或删除；可以打开已有论文、将草稿并入已有论文、放弃上传，或仍然单独入库。
+
+论文详情中的题名、作者、分类等字段需要点击“保存更改”。个人笔记会自动保存，看到“已保存”后即可离开页面。
+
+“回收站”用于恢复或彻底删除论文。彻底删除和清空回收站都需要第二次明确确认。
+
+## 备份与恢复
+
+备份保存在：
 
 ```text
-http://127.0.0.1:8000
+library/backups/
 ```
+
+数据库备份包含 `library.sqlite`、校验清单和说明文件。完整备份还包含 `files/` 中的论文原文件。系统校验文件大小和 SHA-256 后才允许恢复；恢复操作需要明确确认，并会先创建恢复前备份。
+
+`local.env.bat` 永远不会包含在备份中，也不会提交到 Git。API Key 只应保存在这个本机文件中。
 
 ## OCR
 
-系统默认本地优先，不会把论文内容上传到外部 OCR 服务。扫描版 PDF 需要本机安装两个命令行工具：
-
-- Poppler：提供 `pdftoppm`，用于把 PDF 页面渲染成图片。
-- Tesseract OCR：提供 `tesseract`，用于识别图片文字。
-
-Windows 安装后，把 `pdftoppm.exe` 和 `tesseract.exe` 加入 `PATH`，然后在 PowerShell 中检查：
+扫描版 PDF 使用本机 Poppler 和 Tesseract OCR，不会把整篇论文发送到外部 OCR 服务。安装后确认以下命令可用：
 
 ```powershell
 where.exe pdftoppm
@@ -53,7 +61,7 @@ where.exe tesseract
 tesseract --list-langs
 ```
 
-中文论文需要 Tesseract 的 `chi_sim` 语言包。建议启动前设置：
+中文论文需要 Tesseract 的 `chi_sim` 语言包。常用设置：
 
 ```powershell
 $env:QPL_OCR_ENABLED="1"
@@ -62,33 +70,31 @@ $env:QPL_OCR_PAGES="3"
 npm start
 ```
 
-可用环境变量：
+可选变量包括 `QPL_OCR_DPI`、`QPL_PDFTOPPM_BIN` 和 `QPL_TESSERACT_BIN`。OCR 不可用时上传仍会成功，但扫描件的自动识别效果会受限。
 
-- `QPL_OCR_ENABLED=0`：禁用 OCR。
-- `QPL_OCR_LANG`：OCR 语言，默认 `chi_sim+eng`。
-- `QPL_OCR_PAGES`：识别前几页，默认 `3`。
-- `QPL_OCR_DPI`：PDF 渲染分辨率，默认 `220`。
-- `QPL_PDFTOPPM_BIN`：自定义 `pdftoppm` 路径。
-- `QPL_TESSERACT_BIN`：自定义 `tesseract` 路径。
-
-如果 OCR 工具未安装，上传仍会成功，但扫描版 PDF 只能使用文件名兜底识别题名和分类。
-
-## 重新处理旧文献
-
-安装 OCR 后，可以重新处理已经入库或待确认的旧文献：
+旧文献可在安装 OCR 后重新处理：
 
 ```powershell
-$env:QPL_OCR_ENABLED="1"
 npm run reprocess
 ```
 
-脚本会先备份数据库到 `library/backups/`，再更新草稿和已确认论文的元数据与分类。
+脚本会先创建数据库备份，再更新草稿和已入库论文。
 
-## 测试
+## 翻译
 
-```bash
-npm test
+PDF 阅读器会自动翻译选中的文字，只把选中文字发送给翻译接口，不发送整篇 PDF、数据库或笔记。国内网络建议使用 Qwen 的 OpenAI 兼容接口。
+
+将 `local.env.example.bat` 复制为被 Git 忽略的 `local.env.bat`，再填写自己的配置：
+
+```bat
+set QPL_TRANSLATION_ENABLED=1
+set QPL_TRANSLATION_PROVIDER=qwen
+set QWEN_API_KEY=你的_API_Key
+set QPL_QWEN_BASE_URL=你的_OpenAI_兼容地址
+set QPL_QWEN_MODEL=qwen-plus
 ```
+
+系统也支持 Gemini 和 OpenAI，具体变量可参考 `local.env.example.bat`。不要把真实密钥写入源码、README、终端日志或 Git 提交。
 
 ## 数据位置
 
@@ -96,52 +102,22 @@ npm test
 library/
   library.sqlite
   files/
+  backups/
 ```
 
-`library.sqlite` 和 `library/files/` 不会提交到 Git。
+数据库、论文文件、备份和 `local.env.bat` 均不会提交到 GitHub。
 
-## 翻译
-
-PDF 阅读器支持选中文本后在线翻译。翻译默认关闭，需要启动前设置。国内网络优先推荐使用 Qwen / 阿里云百炼的 OpenAI 兼容接口：
+## 测试
 
 ```powershell
-$env:QPL_TRANSLATION_ENABLED="1"
-$env:QPL_TRANSLATION_PROVIDER="qwen"
-$env:QWEN_API_KEY="你的 Qwen API Key"
-$env:QPL_QWEN_BASE_URL="你的 OpenAI 兼容地址，例如 https://.../compatible-mode/v1"
-$env:QPL_QWEN_MODEL="qwen-plus"
-npm start
+npm test
+npm run test:browser
 ```
 
-`QWEN_API_KEY` 也可以换成 `DASHSCOPE_API_KEY`。如果百炼控制台给的是完整 `/chat/completions` 地址，也可以设置 `QPL_QWEN_ENDPOINT`。
-
-也可以继续使用 Gemini：
+首次运行浏览器测试前安装 Chromium：
 
 ```powershell
-$env:QPL_TRANSLATION_ENABLED="1"
-$env:QPL_TRANSLATION_PROVIDER="gemini"
-$env:GEMINI_API_KEY="你的 Gemini API Key"
-$env:QPL_GEMINI_MODEL="gemini-3.5-flash"
-npm start
+npx playwright install chromium
 ```
 
-如果本机直连 Google API 超时，但浏览器或代理能访问，可以让 Node 也走本地代理：
-
-```powershell
-$env:NODE_USE_ENV_PROXY="1"
-$env:HTTPS_PROXY="http://127.0.0.1:10808"
-$env:HTTP_PROXY="http://127.0.0.1:10808"
-npm start
-```
-
-也可以继续使用 OpenAI：
-
-```powershell
-$env:QPL_TRANSLATION_ENABLED="1"
-$env:QPL_TRANSLATION_PROVIDER="openai"
-$env:OPENAI_API_KEY="你的 OpenAI API Key"
-$env:QPL_TRANSLATION_MODEL="gpt-4o-mini"
-npm start
-```
-
-系统只会把你在 PDF 中选中的文字发送给翻译接口，不会上传整篇 PDF、数据库、笔记或文件。
+若本机网络无法下载 Playwright Chromium，可设置 `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` 指向本机 Chromium/Chrome 可执行文件后再运行测试。
