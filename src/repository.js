@@ -347,6 +347,9 @@ export class PaperRepository {
         if (changes.expectedVersion !== current.version) {
           throw new VersionConflictError(changes.expectedVersion, current.version);
         }
+        if (!editableFields.some((field) => Object.hasOwn(changes, field))) {
+          throw new TypeError("At least one editable paper field is required");
+        }
 
         const paper = { ...current };
         for (const field of editableFields) {

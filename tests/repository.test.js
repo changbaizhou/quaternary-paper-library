@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 
-import { initDb } from "../src/database.js";
+import { initDb, openDb } from "../src/database.js";
 import { PaperRepository } from "../src/repository.js";
 
 test("draft confirm and search workflow", async () => {
@@ -113,13 +113,36 @@ test("repository updates confirmed papers and rejects stale versions", async () 
 
     const updated = repo.updatePaper(paperId, {
       expectedVersion: 1,
-      title: "Revised Holocene record",
+      doi: "https://doi.org/10.1000/UPDATED.",
+      title: "Ａ Study: Café—研究!",
       notesCoreFindings: "The revised note is searchable."
     });
 
     assert.equal(updated.version, 2);
-    assert.equal(updated.title, "Revised Holocene record");
+    assert.equal(updated.title, "Ａ Study: Café—研究!");
     assert.equal(repo.searchPapers({ query: "revised note" })[0].id, paperId);
+
+    const db = openDb(dbPath);
+    try {
+      const row = db
+        .prepare("SELECT search_text, normalized_doi, normalized_title FROM papers WHERE id = ?")
+        .get(paperId);
+      assert.equal(row.search_text, "ａ study: café—研究! https://doi.org/10.1000/updated. the revised note is searchable.");
+      assert.equal(row.normalized_doi, "10.1000/updated");
+      assert.equal(row.normalized_title, "a study café 研究");
+    } finally {
+      db.close();
+    }
+
+    const beforeNoop = repo.getPaper(paperId);
+    assert.throws(
+      () => repo.updatePaper(paperId, { expectedVersion: beforeNoop.version }),
+      (error) => error instanceof TypeError
+    );
+    const afterNoop = repo.getPaper(paperId);
+    assert.equal(afterNoop.version, beforeNoop.version);
+    assert.equal(afterNoop.updatedAt, beforeNoop.updatedAt);
+
     assert.throws(
       () => repo.updatePaper(paperId, { expectedVersion: 1, title: "Stale edit" }),
       (error) => error.name === "VersionConflictError"

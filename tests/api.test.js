@@ -95,6 +95,17 @@ test("API edits confirmed paper metadata and notes with conflict protection", as
     });
     const paper = await confirmResponse.json();
 
+    const noopResponse = await fetch(`${baseUrl}/api/papers/${paper.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expectedVersion: paper.version })
+    });
+    assert.equal(noopResponse.status, 400);
+    const papersAfterNoop = await (await fetch(`${baseUrl}/api/papers`)).json();
+    const unchanged = papersAfterNoop.find((item) => item.id === paper.id);
+    assert.equal(unchanged.version, paper.version);
+    assert.equal(unchanged.updatedAt, paper.updatedAt);
+
     const editResponse = await fetch(`${baseUrl}/api/papers/${paper.id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
