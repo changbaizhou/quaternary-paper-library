@@ -145,8 +145,31 @@ test("paper detail exposes a confirmed move-to-trash workflow", async () => {
   assert.match(script, /trashPaperDialog/);
   assert.match(script, /trashPaperDialogCancel/);
   assert.match(script, /trashPaperDialogConfirm/);
-  assert.match(script, /\/api\/papers\/\$\{state\.selectedPaper\.id\}/);
+  assert.match(script, /captureTrashTarget/);
+  assert.match(script, /buildTrashDeleteRequest/);
   assert.match(script, /method:\s*"DELETE"/);
+});
+
+test("trash confirmation keeps its bound target when selection changes", async () => {
+  const script = await readFile("public/app.js", "utf8");
+  const targetHelpers = script.match(/function captureTrashTarget[\s\S]*?function isTrashTargetSelected[\s\S]*?\n}/);
+
+  assert.ok(targetHelpers, "trash target helpers are required");
+  const context = {};
+  vm.runInNewContext(
+    `${targetHelpers[0]}
+const state = { selectedPaper: { id: 2, title: "Paper B" } };
+const target = captureTrashTarget({ id: 1, title: "Paper A" });
+state.selectedPaper = { id: 2, title: "Paper B" };
+result = {
+  request: buildTrashDeleteRequest(target),
+  clearsSelection: isTrashTargetSelected(state.selectedPaper, target)
+};`,
+    context
+  );
+
+  assert.equal(JSON.stringify(context.result.request), JSON.stringify({ path: "/api/papers/1", options: { method: "DELETE" } }));
+  assert.equal(context.result.clearsSelection, false);
 });
 
 test("paper save status has a stable bounded text block", async () => {

@@ -37,6 +37,7 @@ const state = {
   noteSavePromise: null,
   metadataSavePromise: null,
   draftConfirmPromise: null,
+  trashTargetPaper: null,
   trashPaperPromise: null,
   reader: {
     document: null,
@@ -249,8 +250,20 @@ function confirmAction(title, message, confirmLabel = "确认") {
   });
 }
 
+function captureTrashTarget(paper) {
+  return Object.freeze({ id: paper.id, title: paper.title || "未命名论文" });
+}
+
+function buildTrashDeleteRequest(target) {
+  return { path: `/api/papers/${target.id}`, options: { method: "DELETE" } };
+}
+
+function isTrashTargetSelected(selectedPaper, target) {
+  return selectedPaper?.id === target.id;
+}
+
 function confirmTrashPaper(paper) {
-  const message = `确定将《${paper.title || "未命名论文"}》移入回收站吗？原始 PDF 会保留。`;
+  const message = `确定将《${paper.title}》移入回收站吗？原始 PDF 会保留。`;
   if (!trashElements.dialog?.showModal) return Promise.resolve(window.confirm(message));
   trashElements.title.textContent = "移入回收站";
   trashElements.message.textContent = message;
@@ -326,6 +339,7 @@ function updateTrashPaperButton() {
     fields.draftId.value ||
     state.metadataSavePromise ||
     state.noteSavePromise ||
+    state.trashTargetPaper ||
     state.trashPaperPromise
   );
 }
@@ -1100,23 +1114,33 @@ async function moveSelectedPaperToTrash() {
     state.trashPaperPromise
   ) return;
 
-  const paper = state.selectedPaper;
-  if (!await confirmTrashPaper(paper)) return;
-  if (state.selectedPaper?.id !== paper.id) return;
+  const target = captureTrashTarget(state.selectedPaper);
+  state.trashTargetPaper = target;
+  updateTrashPaperButton();
+  if (!await confirmTrashPaper(target)) {
+    if (state.trashTargetPaper === target) state.trashTargetPaper = null;
+    updateTrashPaperButton();
+    return;
+  }
+  const confirmedTarget = state.trashTargetPaper;
+  state.trashTargetPaper = null;
+  updateTrashPaperButton();
+  if (!confirmedTarget) return;
 
-  const paperIndex = state.papers.findIndex((entry) => entry.id === paper.id);
+  const paperIndex = state.papers.findIndex((entry) => entry.id === confirmedTarget.id);
   const nextPaperId = paperIndex >= 0 ? state.papers[paperIndex + 1]?.id : null;
   const promise = (async () => {
     setStatus("正在移入回收站");
     if (!(await flushPendingNotes())) return;
     if (await flushReadingProgress({ force: true, reportErrors: true }) === false) return;
 
-    await api(`/api/papers/${state.selectedPaper.id}`, { method: "DELETE" });
+    const request = buildTrashDeleteRequest(confirmedTarget);
+    await api(request.path, request.options);
     await closeReaderDocument();
     readerElements.viewer.innerHTML = `<div class="empty-state">选择论文后阅读原文件</div>`;
     updateTranslationPanel("未选择文本", "", { hidden: true });
-    state.papers = state.papers.filter((entry) => entry.id !== paper.id);
-    clearPaperSelection();
+    state.papers = state.papers.filter((entry) => entry.id !== confirmedTarget.id);
+    if (isTrashTargetSelected(state.selectedPaper, confirmedTarget)) clearPaperSelection();
     await refreshLibraryData();
     showPaperListView();
     const nextPaper = nextPaperId
@@ -1134,6 +1158,7 @@ async function moveSelectedPaperToTrash() {
     setStatus(error.message);
   } finally {
     if (state.trashPaperPromise === promise) state.trashPaperPromise = null;
+    if (state.trashTargetPaper === confirmedTarget) state.trashTargetPaper = null;
     updateTrashPaperButton();
   }
 }
