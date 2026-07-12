@@ -116,6 +116,29 @@ test("reader exposes a persistent auto-translate toggle and local translation ca
   assert.match(script, /if \(!readerElements\.autoTranslateToggle\.checked\) return;/);
 });
 
+test("reader can collapse and reopen the annotation sidebar", async () => {
+  const html = await readFile("public/index.html", "utf8");
+  const script = await readFile("public/app.js", "utf8");
+  const css = await readFile("public/styles.css", "utf8");
+
+  assert.match(html, /id="toggleAnnotationsButton"[^>]*aria-pressed="true"/);
+  assert.match(script, /function setAnnotationsVisible/);
+  assert.match(script, /readerElements\.annotationSidebar\.hidden = !visible/);
+  assert.match(css, /\.reader-body\.annotations-hidden\s*{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/s);
+});
+
+test("workspace can collapse and reopen the search sidebar", async () => {
+  const html = await readFile("public/index.html", "utf8");
+  const script = await readFile("public/app.js", "utf8");
+  const css = await readFile("public/styles.css", "utf8");
+
+  assert.match(html, /id="toggleFiltersButton"[^>]*aria-pressed="true"/);
+  assert.match(html, /<main[^>]*id="workspace"/);
+  assert.match(script, /function setFiltersVisible/);
+  assert.match(script, /workspaceElements\.filters\.hidden = !visible/);
+  assert.match(css, /\.workspace\.filters-hidden\s*{[^}]*grid-template-columns:\s*minmax\(420px, 1fr\) 456px/s);
+});
+
 test("popover menus close on outside interaction and Escape", async () => {
   const script = await readFile("public/app.js", "utf8");
 

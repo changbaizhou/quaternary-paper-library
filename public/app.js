@@ -162,6 +162,7 @@ const readerElements = {
   setBookmarkButton: document.querySelector("#setBookmarkButton"),
   goBookmarkButton: document.querySelector("#goBookmarkButton"),
   bookmarkStatusText: document.querySelector("#bookmarkStatusText"),
+  toggleAnnotationsButton: document.querySelector("#toggleAnnotationsButton"),
   autoTranslateToggle: document.querySelector("#autoTranslateToggle"),
   translateSelectionButton: document.querySelector("#translateSelectionButton"),
   translationPanel: document.querySelector("#translationPanel"),
@@ -189,6 +190,9 @@ const readerElements = {
 };
 
 const workspaceElements = {
+  root: document.querySelector("#workspace"),
+  filters: document.querySelector(".filters"),
+  toggleFiltersButton: document.querySelector("#toggleFiltersButton"),
   library: document.querySelector("#paperListView"),
   paperListPanel: document.querySelector(".paper-list-panel"),
   trash: document.querySelector("#trashView"),
@@ -1661,6 +1665,22 @@ function recordLastReadPage(pageNumber) {
   void saveReadingProgress({ lastReadPage: page });
 }
 
+function setFiltersVisible(visible) {
+  workspaceElements.filters.hidden = !visible;
+  workspaceElements.root.classList.toggle("filters-hidden", !visible);
+  workspaceElements.toggleFiltersButton.setAttribute("aria-pressed", String(visible));
+  workspaceElements.toggleFiltersButton.classList.toggle("is-active", visible);
+  workspaceElements.toggleFiltersButton.title = visible ? "隐藏检索栏" : "显示检索栏";
+}
+
+function setAnnotationsVisible(visible) {
+  readerElements.annotationSidebar.hidden = !visible;
+  readerElements.annotationSidebar.parentElement.classList.toggle("annotations-hidden", !visible);
+  readerElements.toggleAnnotationsButton.setAttribute("aria-pressed", String(visible));
+  readerElements.toggleAnnotationsButton.classList.toggle("is-active", visible);
+  readerElements.toggleAnnotationsButton.textContent = visible ? "隐藏批注" : "显示批注";
+}
+
 function readTranslationCache() {
   try {
     const parsed = JSON.parse(localStorage.getItem(TRANSLATION_CACHE_STORAGE_KEY) || "[]");
@@ -2539,6 +2559,14 @@ citationElements.copyBibliography.addEventListener("click", () => void copyCitat
 citationElements.exportSelected.addEventListener("click", () => void exportSelectedCitations());
 document.addEventListener("pointerdown", closeOpenDisclosureMenus);
 document.addEventListener("keydown", closeOpenDisclosureMenus);
+workspaceElements.toggleFiltersButton.addEventListener("click", () => {
+  setFiltersVisible(workspaceElements.filters.hidden);
+});
+readerElements.toggleAnnotationsButton.addEventListener("click", () => {
+  setAnnotationsVisible(readerElements.annotationSidebar.hidden);
+});
+setFiltersVisible(true);
+setAnnotationsVisible(true);
 
 try {
   readerElements.autoTranslateToggle.checked = localStorage.getItem(AUTO_TRANSLATE_STORAGE_KEY) !== "0";

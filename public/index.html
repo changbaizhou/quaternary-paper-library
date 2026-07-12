@@ -33,6 +33,9 @@
           <button id="maintenanceViewButton" type="button" class="view-button" data-view="maintenance" aria-pressed="false">
             <span aria-hidden="true">⚙</span><span>维护</span>
           </button>
+          <button id="toggleFiltersButton" type="button" class="view-button" aria-pressed="true" title="显示或隐藏检索栏">
+            <span aria-hidden="true">⌕</span><span>检索栏</span>
+          </button>
         </nav>
         <div class="export-group top-actions">
         <a href="/api/export/bibtex">BibTeX</a>
@@ -59,7 +62,7 @@
       </div>
     </header>
 
-    <main class="workspace">
+    <main id="workspace" class="workspace">
       <aside class="filters">
         <section class="panel-section search-section">
           <h2>检索</h2>
@@ -143,6 +146,7 @@
             <button id="setBookmarkButton" type="button" class="secondary bookmark-button" title="保存当前页为这篇论文的唯一书签">设书签</button>
             <button id="goBookmarkButton" type="button" class="secondary bookmark-button" title="跳转到这篇论文保存的书签">跳书签</button>
             <span id="bookmarkStatusText">未设书签</span>
+            <button id="toggleAnnotationsButton" type="button" class="secondary" aria-pressed="true" title="显示或隐藏批注栏">批注栏</button>
             <label class="auto-translate-toggle" title="选中文字后自动翻译">
               <input id="autoTranslateToggle" type="checkbox" checked />
               <span>自动翻译</span>

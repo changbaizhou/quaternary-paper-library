@@ -255,6 +255,18 @@ h3 {
   padding: 12px;
 }
 
+.workspace.filters-hidden {
+  grid-template-columns: minmax(420px, 1fr) 456px;
+}
+
+.workspace.filters-hidden .projects-workspace {
+  grid-column: 1;
+}
+
+.filters[hidden] {
+  display: none;
+}
+
 .filters,
 .paper-list-panel,
 .detail-panel {
@@ -1343,6 +1355,10 @@ textarea {
   overflow: hidden;
 }
 
+.reader-body.annotations-hidden {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .reader-body .pdf-viewer {
   min-width: 0;
 }
@@ -1575,6 +1591,10 @@ textarea {
 
   .workspace {
     height: auto;
+    grid-template-columns: 1fr;
+  }
+
+  .workspace.filters-hidden {
     grid-template-columns: 1fr;
   }
 
