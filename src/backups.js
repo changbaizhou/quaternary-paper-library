@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   copyFileSync,
-  cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -98,53 +97,78 @@ function writeReadme(directoryPath, backupType) {
   writeFileSync(path.join(directoryPath, "README.txt"), contents, "utf8");
 }
 
+function copyDirectory(sourceDirectory, targetDirectory) {
+  mkdirSync(targetDirectory, { recursive: true });
+  for (const entry of readdirSync(sourceDirectory, { withFileTypes: true })) {
+    const sourcePath = path.join(sourceDirectory, entry.name);
+    const targetPath = path.join(targetDirectory, entry.name);
+    const info = lstatSync(sourcePath);
+    if (info.isSymbolicLink()) {
+      throw new BackupValidationError("Full backups cannot include links");
+    }
+    if (info.isDirectory()) {
+      copyDirectory(sourcePath, targetPath);
+      continue;
+    }
+    if (!info.isFile()) {
+      throw new BackupValidationError("Full backups can include only regular files");
+    }
+    copyFileSync(sourcePath, targetPath);
+  }
+}
+
 function createBackup({ dbPath, filesDir, backupsDir, backupType, reason = "manual", now = Date.now }) {
   mkdirSync(backupsDir, { recursive: true });
   const createdAt = asDate(typeof now === "function" ? now() : now).toISOString();
   const directoryPath = allocateDirectory(backupsDir, backupTimestamp(createdAt), backupType);
   mkdirSync(directoryPath, { recursive: true });
 
-  let db;
   try {
-    db = openDb(dbPath);
+    let db;
     try {
-      db.exec("PRAGMA wal_checkpoint(FULL)");
-    } catch {
-      // Older SQLite builds may not support WAL checkpointing.
+      db = openDb(dbPath);
+      try {
+        db.exec("PRAGMA wal_checkpoint(FULL)");
+      } catch {
+        // Older SQLite builds may not support WAL checkpointing.
+      }
+    } finally {
+      db?.close();
     }
-  } finally {
-    db?.close();
+
+    const databasePath = path.join(directoryPath, "library.sqlite");
+    copyFileSync(dbPath, databasePath);
+    if (backupType === "full") {
+      copyDirectory(filesDir, path.join(directoryPath, "files"));
+    }
+
+    const manifest = {
+      version: MANIFEST_VERSION,
+      backupType,
+      createdAt,
+      reason,
+      files: listFiles(directoryPath).filter((file) => file.path !== "manifest.json" && file.path !== "README.txt")
+    };
+    const manifestPath = path.join(directoryPath, "manifest.json");
+    writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    writeReadme(directoryPath, backupType);
+
+    return {
+      backupType,
+      reason,
+      createdAt,
+      directoryPath,
+      databasePath,
+      manifestPath,
+      manifestSha256: sha256File(manifestPath),
+      readmePath: path.join(directoryPath, "README.txt"),
+      manifest,
+      sizeBytes: manifest.files.reduce((total, file) => total + file.size, 0)
+    };
+  } catch (error) {
+    rmSync(directoryPath, { recursive: true, force: true });
+    throw error;
   }
-
-  const databasePath = path.join(directoryPath, "library.sqlite");
-  copyFileSync(dbPath, databasePath);
-  if (backupType === "full") {
-    cpSync(filesDir, path.join(directoryPath, "files"), { recursive: true });
-  }
-
-  const manifest = {
-    version: MANIFEST_VERSION,
-    backupType,
-    createdAt,
-    reason,
-    files: listFiles(directoryPath).filter((file) => file.path !== "manifest.json" && file.path !== "README.txt")
-  };
-  const manifestPath = path.join(directoryPath, "manifest.json");
-  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-  writeReadme(directoryPath, backupType);
-
-  return {
-    backupType,
-    reason,
-    createdAt,
-    directoryPath,
-    databasePath,
-    manifestPath,
-    manifestSha256: sha256File(manifestPath),
-    readmePath: path.join(directoryPath, "README.txt"),
-    manifest,
-    sizeBytes: manifest.files.reduce((total, file) => total + file.size, 0)
-  };
 }
 
 export function createDatabaseBackup(options) {
@@ -192,7 +216,7 @@ export function validateBackup(manifestPath) {
 
 function copyRollbackFiles(filesDir, rollbackFilesDir) {
   if (!existsSync(filesDir)) return false;
-  cpSync(filesDir, rollbackFilesDir, { recursive: true });
+  copyDirectory(filesDir, rollbackFilesDir);
   return true;
 }
 
@@ -225,7 +249,7 @@ export function restoreBackup({
     copyFileSync(path.join(backupDirectory, "library.sqlite"), dbPath);
     if (validation.manifest.backupType === "full") {
       rmSync(filesDir, { recursive: true, force: true });
-      cpSync(path.join(backupDirectory, "files"), filesDir, { recursive: true });
+      copyDirectory(path.join(backupDirectory, "files"), filesDir);
     }
     initialize(dbPath, { backupsDir });
     rmSync(rollbackDirectory, { recursive: true, force: true });
@@ -235,7 +259,7 @@ export function restoreBackup({
     if (hadDatabase) copyFileSync(rollbackDbPath, dbPath);
     if (validation.manifest.backupType === "full") {
       rmSync(filesDir, { recursive: true, force: true });
-      if (hadFiles) cpSync(rollbackFilesDir, filesDir, { recursive: true });
+      if (hadFiles) copyDirectory(rollbackFilesDir, filesDir);
     }
     try {
       initialize(dbPath, { backupsDir });

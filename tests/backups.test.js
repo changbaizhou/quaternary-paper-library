@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -54,6 +54,29 @@ test("backup validation rejects a manifest path traversal", async () => {
     const manifestPath = path.join(dir, "manifest.json");
     await writeFile(manifestPath, JSON.stringify({ files: [{ path: "../outside", size: 0, sha256: "" }] }));
     assert.equal(validateBackup(manifestPath).valid, false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("full backups reject links instead of copying outside the files directory", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-backups-link-"));
+  const dbPath = path.join(dir, "library.sqlite");
+  const filesDir = path.join(dir, "files");
+  const backupsDir = path.join(dir, "backups");
+  const outsideDir = path.join(dir, "outside");
+
+  try {
+    await mkdir(filesDir, { recursive: true });
+    await mkdir(outsideDir, { recursive: true });
+    await writeFile(path.join(outsideDir, "outside.pdf"), "outside");
+    await symlink(outsideDir, path.join(filesDir, "linked"), process.platform === "win32" ? "junction" : "dir");
+    initDb(dbPath, { backupsDir });
+
+    assert.throws(
+      () => createFullBackup({ dbPath, filesDir, backupsDir }),
+      /link/i
+    );
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
