@@ -24,6 +24,9 @@
           <button id="libraryViewButton" type="button" class="view-button is-active" data-view="library" aria-pressed="true">
             <span aria-hidden="true">▤</span><span>论文库</span>
           </button>
+          <button id="projectsViewButton" type="button" class="view-button" data-view="projects" aria-pressed="false">
+            <span aria-hidden="true">▦</span><span>项目</span>
+          </button>
           <button id="trashViewButton" type="button" class="view-button" data-view="trash" aria-pressed="false">
             <span aria-hidden="true">♲</span><span>回收站</span>
           </button>
@@ -235,11 +238,43 @@
         </div>
       </section>
 
+      <div id="projectsView" class="panel-view projects-workspace" hidden>
+          <section class="projects-list-pane">
+            <div class="panel-heading">
+              <div><h2>项目</h2><p class="panel-subtitle">研究问题与论文集合</p></div>
+              <button id="createProjectButton" type="button" class="secondary compact-action" title="创建项目">＋</button>
+            </div>
+            <div id="projectStatusTabs" class="project-status-tabs" role="tablist">
+              <button type="button" class="secondary is-active" data-project-status="all">全部</button>
+              <button type="button" class="secondary" data-project-status="active">进行中</button>
+              <button type="button" class="secondary" data-project-status="archived">已归档</button>
+            </div>
+            <div id="projectList" class="project-list"></div>
+          </section>
+          <section class="project-queue-pane">
+            <div class="panel-heading">
+              <div><h2 id="projectQueueTitle">阅读队列</h2><p id="projectQueueMeta" class="panel-subtitle">请选择项目</p></div>
+              <button id="addPaperToProjectButton" type="button" class="secondary compact-action" disabled>加入论文</button>
+            </div>
+            <div id="projectQueueList" class="project-queue-list"></div>
+          </section>
+      </div>
+
       <section class="detail-panel">
         <div class="panel-heading">
           <h2 id="detailTitle">详情</h2>
           <span id="detailMode">未选择</span>
         </div>
+        <section id="projectEvidencePanel" class="project-evidence-panel" hidden>
+          <div class="project-evidence-heading">
+            <div><h3>证据表</h3><p id="projectEvidenceMeta" class="panel-subtitle"></p></div>
+            <div class="detail-action-group">
+              <button id="exportProjectEvidenceCsv" type="button" class="secondary compact-action">CSV</button>
+              <button id="exportProjectEvidenceMarkdown" type="button" class="secondary compact-action">Markdown</button>
+            </div>
+          </div>
+          <div id="projectEvidence" class="project-evidence"></div>
+        </section>
         <form id="detailForm" class="detail-form">
           <input type="hidden" id="draftId" />
           <section class="detail-section basic-section">
@@ -334,6 +369,7 @@
           <div class="detail-save-bar">
             <span id="paperSaveStatus" class="paper-save-status is-neutral" aria-live="polite">未修改</span>
             <div class="detail-action-group">
+              <button id="paperAddToProjectButton" type="button" class="secondary" disabled>加入项目</button>
               <button id="trashPaperButton" type="button" class="secondary danger-action" disabled>移入回收站</button>
               <button id="savePaperButton" type="submit">确认入库</button>
             </div>
@@ -360,6 +396,37 @@
         <div class="dialog-actions">
           <button id="trashPaperDialogCancel" value="cancel" type="submit" class="secondary">取消</button>
           <button id="trashPaperDialogConfirm" value="confirm" type="submit" class="danger-action">移入回收站</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="projectDialog" class="confirm-dialog">
+      <form id="projectForm" method="dialog">
+        <h2 id="projectDialogTitle">创建项目</h2>
+        <input id="projectIdField" type="hidden" />
+        <label>名称<input id="projectNameField" type="text" required /></label>
+        <label>描述<textarea id="projectDescriptionField" rows="3"></textarea></label>
+        <label>状态<select id="projectStatusField"><option value="active">进行中</option><option value="archived">已归档</option></select></label>
+        <div class="dialog-actions">
+          <button id="projectDialogCancel" value="cancel" type="submit" class="secondary">取消</button>
+          <button id="projectDialogConfirm" value="confirm" type="submit">保存</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="projectPaperDialog" class="confirm-dialog project-paper-dialog">
+      <form id="projectPaperForm" method="dialog">
+        <h2>加入项目</h2>
+        <div id="projectPaperChoices" class="project-paper-choices"></div>
+        <div class="two-column">
+          <label>优先级<select id="projectPaperPriorityField"><option value="1">1</option><option value="2">2</option><option value="3" selected>3</option><option value="4">4</option><option value="5">5</option></select></label>
+          <label>立场<select id="projectPaperStanceField"><option value="unknown">未知</option><option value="supports">支持</option><option value="opposes">反对</option><option value="mixed">混合</option><option value="background">背景</option></select></label>
+        </div>
+        <label>项目状态<select id="projectPaperStatusField"><option value="queued">待读</option><option value="reading">阅读中</option><option value="reviewed">已复核</option></select></label>
+        <label>项目备注<textarea id="projectPaperNoteField" rows="2"></textarea></label>
+        <div class="dialog-actions">
+          <button id="projectPaperDialogCancel" value="cancel" type="submit" class="secondary">取消</button>
+          <button id="projectPaperDialogConfirm" value="confirm" type="submit">加入</button>
         </div>
       </form>
     </dialog>

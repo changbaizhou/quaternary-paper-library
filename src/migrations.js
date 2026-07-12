@@ -287,6 +287,35 @@ const migrations = [
         WHERE citation_key <> '';
       `);
     }
+  },
+  {
+    version: 6,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS research_projects (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+          description TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+          version INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS project_papers (
+          project_id INTEGER NOT NULL,
+          paper_id INTEGER NOT NULL,
+          priority INTEGER NOT NULL DEFAULT 3 CHECK (priority BETWEEN 1 AND 5),
+          stance TEXT NOT NULL DEFAULT 'unknown' CHECK (stance IN ('supports', 'opposes', 'mixed', 'background', 'unknown')),
+          project_status TEXT NOT NULL DEFAULT 'queued' CHECK (project_status IN ('queued', 'reading', 'reviewed')),
+          project_note TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (project_id, paper_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_project_papers_paper ON project_papers (paper_id);
+        CREATE INDEX IF NOT EXISTS idx_project_papers_status ON project_papers (project_status);
+      `);
+    }
   }
 ];
 

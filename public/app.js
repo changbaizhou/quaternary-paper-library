@@ -32,6 +32,12 @@ const state = {
   trash: [],
   backups: [],
   duplicateRows: [],
+  projects: [],
+  projectStatusFilter: "all",
+  selectedProject: null,
+  projectPapers: [],
+  projectEvidenceRows: [],
+  projectPaperDialogMode: "papers",
   currentView: "library",
   selectedDraft: null,
   selectedPaper: null,
@@ -179,8 +185,17 @@ const readerElements = {
 
 const workspaceElements = {
   library: document.querySelector("#paperListView"),
+  paperListPanel: document.querySelector(".paper-list-panel"),
   trash: document.querySelector("#trashView"),
   maintenance: document.querySelector("#maintenanceView"),
+  projects: document.querySelector("#projectsView"),
+  projectList: document.querySelector("#projectList"),
+  projectQueueList: document.querySelector("#projectQueueList"),
+  projectQueueTitle: document.querySelector("#projectQueueTitle"),
+  projectQueueMeta: document.querySelector("#projectQueueMeta"),
+  projectEvidencePanel: document.querySelector("#projectEvidencePanel"),
+  projectEvidence: document.querySelector("#projectEvidence"),
+  projectEvidenceMeta: document.querySelector("#projectEvidenceMeta"),
   trashCount: document.querySelector("#trashCount"),
   trashList: document.querySelector("#trashList"),
   duplicateCandidates: document.querySelector("#duplicateCandidates"),
@@ -190,6 +205,7 @@ const workspaceElements = {
 
 const viewButtons = {
   library: document.querySelector("#libraryViewButton"),
+  projects: document.querySelector("#projectsViewButton"),
   trash: document.querySelector("#trashViewButton"),
   maintenance: document.querySelector("#maintenanceViewButton")
 };
@@ -712,6 +728,7 @@ function showWorkspaceView(view) {
   state.currentView = view;
   for (const [name, element] of Object.entries({
     library: workspaceElements.library,
+    projects: workspaceElements.projects,
     trash: workspaceElements.trash,
     maintenance: workspaceElements.maintenance
   })) {
@@ -719,6 +736,11 @@ function showWorkspaceView(view) {
   }
   readerElements.readerView.hidden = true;
   readerElements.listView.hidden = view !== "library";
+  workspaceElements.paperListPanel.hidden = view === "projects";
+  workspaceElements.projectEvidencePanel.hidden = view !== "projects";
+  document.querySelector("#detailForm").hidden = view === "projects";
+  document.querySelector("#detailTitle").textContent = view === "projects" ? "项目证据" : "详情";
+  document.querySelector("#detailMode").textContent = view === "projects" ? "批量证据" : "未选择";
   for (const [name, button] of Object.entries(viewButtons)) {
     const active = name === view;
     button.classList.toggle("is-active", active);
@@ -767,6 +789,8 @@ function updateTrashPaperButton() {
     state.trashTargetPaper ||
     state.trashPaperPromise
   );
+  const addToProjectButton = document.querySelector("#paperAddToProjectButton");
+  if (addToProjectButton) addToProjectButton.disabled = !state.selectedPaper || Boolean(fields.draftId.value);
 }
 
 function chip(label, className = "") {
@@ -1013,6 +1037,140 @@ function renderBackups() {
       `).join("")}
     </div>
   `;
+}
+
+function projectStatusLabel(status) {
+  return { active: "进行中", archived: "已归档" }[status] || status;
+}
+
+function renderProjects() {
+  const visible = state.projects.filter((project) => state.projectStatusFilter === "all" || project.status === state.projectStatusFilter);
+  workspaceElements.projectList.innerHTML = visible.length
+    ? visible.map((project) => `
+      <article class="project-item${state.selectedProject?.id === project.id ? " selected" : ""}" data-project-id="${project.id}">
+        <button type="button" class="project-select" data-action="select-project" data-project-id="${project.id}">
+          <strong>${escapeHtml(project.name)}</strong><span>${escapeHtml(projectStatusLabel(project.status))}</span>
+        </button>
+        <button type="button" class="secondary compact-action project-edit" data-action="edit-project" data-project-id="${project.id}" title="编辑项目">编辑</button>
+      </article>
+    `).join("")
+    : `<div class="empty-state">暂无项目</div>`;
+}
+
+function renderProjectQueue() {
+  const project = state.selectedProject;
+  workspaceElements.projectQueueTitle.textContent = project?.name || "阅读队列";
+  workspaceElements.projectQueueMeta.textContent = project ? `${state.projectPapers.length} 篇论文 · ${projectStatusLabel(project.status)}` : "请选择项目";
+  document.querySelector("#addPaperToProjectButton").disabled = !project;
+  if (!state.projectPapers.length) {
+    workspaceElements.projectQueueList.innerHTML = `<div class="empty-state">项目中还没有论文</div>`;
+    return;
+  }
+  workspaceElements.projectQueueList.innerHTML = state.projectPapers.map((relation) => `
+    <article class="project-paper-item${relation.paperStatus === "inactive" ? " is-inactive" : ""}" data-paper-id="${relation.paperId}">
+      <button type="button" class="project-paper-title" data-action="open-project-paper" data-paper-id="${relation.paperId}">${escapeHtml(relation.title || "未命名论文")}</button>
+      <span class="project-paper-meta">${escapeHtml([relation.citationKey, relation.paperStatus === "inactive" ? "inactive" : "active"].filter(Boolean).join(" · "))}</span>
+      <div class="project-paper-controls">
+        <label>优先级<select data-action="update-project-paper" data-field="priority" data-paper-id="${relation.paperId}">${[1, 2, 3, 4, 5].map((value) => `<option value="${value}"${relation.priority === value ? " selected" : ""}>${value}</option>`).join("")}</select></label>
+        <label>立场<select data-action="update-project-paper" data-field="stance" data-paper-id="${relation.paperId}">${["supports", "opposes", "mixed", "background", "unknown"].map((value) => `<option value="${value}"${relation.stance === value ? " selected" : ""}>${value}</option>`).join("")}</select></label>
+        <label>状态<select data-action="update-project-paper" data-field="projectStatus" data-paper-id="${relation.paperId}">${["queued", "reading", "reviewed"].map((value) => `<option value="${value}"${relation.projectStatus === value ? " selected" : ""}>${value}</option>`).join("")}</select></label>
+        <label class="project-note-field">备注<input data-action="update-project-paper" data-field="projectNote" data-paper-id="${relation.paperId}" value="${escapeHtml(relation.projectNote || "")}" /></label>
+        <button type="button" class="secondary compact-action danger-action" data-action="remove-project-paper" data-paper-id="${relation.paperId}">移除</button>
+      </div>
+    </article>
+  `).join("");
+}
+
+function renderProjectEvidence() {
+  const rows = state.projectEvidenceRows;
+  workspaceElements.projectEvidenceMeta.textContent = `${rows.length} 条证据行`;
+  if (!rows.length) {
+    workspaceElements.projectEvidence.innerHTML = `<div class="empty-state">暂无证据</div>`;
+    return;
+  }
+  workspaceElements.projectEvidence.innerHTML = `
+    <div class="project-evidence-row project-evidence-head"><span>论文</span><span>关系</span><span>分类</span><span>研究卡片</span></div>
+    ${rows.map((row) => `
+      <article class="project-evidence-row">
+        <div data-label="论文"><button type="button" class="record-link" data-action="open-evidence-paper" data-paper-id="${row.paperId}">${escapeHtml(row.citationKey || row.title || "未命名论文")}</button><strong>${escapeHtml(row.title || "")}</strong><small>${escapeHtml([row.authors, row.year, row.paperStatus].filter(Boolean).join(" · "))}</small></div>
+        <div data-label="关系"><span>${escapeHtml(row.stance)}</span><span>${escapeHtml(row.projectStatus)}</span><span>P${row.priority}</span><small>${escapeHtml(row.projectNote)}</small></div>
+        <div data-label="分类"><span>${escapeHtml(row.classification.regions)}</span><span>${escapeHtml(row.classification.periods)}</span><span>${escapeHtml(row.classification.materials)}</span><span>${escapeHtml(row.classification.methods)}</span></div>
+        <div data-label="研究卡片">${row.card.quote ? `<button type="button" class="record-link" data-action="open-evidence-card" data-paper-id="${row.paperId}" data-page="${row.card.page}">p.${row.card.page} · ${escapeHtml(row.card.evidenceType)}</button><p>${escapeHtml(row.card.quote)}</p><small>${escapeHtml(row.card.summary)}</small>` : "无卡片"}</div>
+      </article>
+    `).join("")}
+  `;
+}
+
+async function loadSelectedProject(project) {
+  state.selectedProject = project;
+  if (!project) {
+    state.projectPapers = [];
+    state.projectEvidenceRows = [];
+    renderProjectQueue();
+    renderProjectEvidence();
+    return;
+  }
+  state.projectPapers = await api(`/api/projects/${project.id}/papers`);
+  state.projectEvidenceRows = await api(`/api/projects/${project.id}/evidence?format=json`);
+  renderProjects();
+  renderProjectQueue();
+  renderProjectEvidence();
+}
+
+async function loadProjects() {
+  state.projects = await api("/api/projects");
+  const selected = state.projects.find((project) => project.id === state.selectedProject?.id) || state.projects[0] || null;
+  await loadSelectedProject(selected);
+  renderProjects();
+}
+
+function openProjectDialog(project = null) {
+  const dialog = document.querySelector("#projectDialog");
+  document.querySelector("#projectDialogTitle").textContent = project ? "编辑项目" : "创建项目";
+  document.querySelector("#projectIdField").value = project?.id || "";
+  document.querySelector("#projectNameField").value = project?.name || "";
+  document.querySelector("#projectDescriptionField").value = project?.description || "";
+  document.querySelector("#projectStatusField").value = project?.status || "active";
+  dialog.showModal();
+}
+
+async function openProjectPaperDialog() {
+  if (!state.selectedProject) return;
+  const papers = await loadAllPapers();
+  const existing = new Set(state.projectPapers.map((relation) => relation.paperId));
+  document.querySelector("#projectPaperChoices").innerHTML = papers.map((paper) => `
+    <label class="project-paper-choice${paper.status !== "active" ? " is-inactive" : ""}">
+      <input type="checkbox" data-paper-id="${paper.id}"${existing.has(paper.id) ? " checked disabled" : ""}${paper.status !== "active" ? " disabled" : ""} />
+      <span>${escapeHtml(paper.title || "未命名论文")}</span><small>${escapeHtml(paper.status || "active")}</small>
+    </label>
+  `).join("") || `<div class="empty-state">暂无可加入论文</div>`;
+  document.querySelector("#projectPaperDialog").showModal();
+}
+
+async function openProjectPickerForPaper() {
+  if (!state.selectedPaper) return;
+  state.projectPaperDialogMode = "projects";
+  const projects = await api("/api/projects?status=active");
+  const memberships = await Promise.all(projects.map(async (project) => [project.id, await api(`/api/projects/${project.id}/papers`)]));
+  const existing = new Set(memberships.filter(([, papers]) => papers.some((paper) => paper.paperId === state.selectedPaper.id)).map(([projectId]) => projectId));
+  document.querySelector("#projectPaperChoices").innerHTML = projects.map((project) => `
+    <label class="project-paper-choice">
+      <input type="checkbox" data-project-id="${project.id}"${existing.has(project.id) ? " checked disabled" : ""} />
+      <span>${escapeHtml(project.name)}</span><small>${escapeHtml(projectStatusLabel(project.status))}</small>
+    </label>
+  `).join("") || `<div class="empty-state">暂无进行中项目</div>`;
+  document.querySelector("#projectPaperDialog").showModal();
+}
+
+async function openEvidencePaper(paperId, page = null) {
+  const paper = (await loadAllPapers()).find((entry) => entry.id === Number(paperId));
+  if (!paper) return;
+  fillFormFromPaper(paper);
+  if (page) await openReader(paper, { targetPage: Number(page) });
+  else {
+    showWorkspaceView("library");
+    renderPapers();
+  }
 }
 
 function fillFormFromDraft(draft) {
@@ -2353,10 +2511,157 @@ async function selectWorkspaceView(view) {
   try {
     if (view === "trash") await loadTrash();
     if (view === "maintenance") await Promise.all([loadDuplicateCandidates(), loadBackups()]);
+    if (view === "projects") await loadProjects();
   } catch (error) {
     setStatus(error.message);
   }
 }
+
+document.querySelector("#createProjectButton").addEventListener("click", () => openProjectDialog());
+document.querySelector("#projectStatusTabs").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-project-status]");
+  if (!button) return;
+  state.projectStatusFilter = button.dataset.projectStatus;
+  for (const tab of document.querySelectorAll("#projectStatusTabs [data-project-status]")) tab.classList.toggle("is-active", tab === button);
+  renderProjects();
+});
+
+document.querySelector("#projectList").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-action]");
+  if (!button) return;
+  const project = state.projects.find((entry) => entry.id === Number(button.dataset.projectId));
+  if (!project) return;
+  try {
+    if (button.dataset.action === "edit-project") {
+      openProjectDialog(project);
+      return;
+    }
+    if (button.dataset.action === "select-project") await loadSelectedProject(project);
+  } catch (error) {
+    setStatus(error.message);
+  }
+});
+
+document.querySelector("#projectQueueList").addEventListener("change", async (event) => {
+  const control = event.target.closest('[data-action="update-project-paper"]');
+  if (!control || !state.selectedProject) return;
+  try {
+    await api(`/api/projects/${state.selectedProject.id}/papers/${control.dataset.paperId}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ [control.dataset.field]: control.value })
+    });
+    await loadSelectedProject(state.selectedProject);
+  } catch (error) {
+    setStatus(error.message);
+  }
+});
+
+document.querySelector("#projectQueueList").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-action]");
+  if (!button) return;
+  try {
+    if (button.dataset.action === "open-project-paper") {
+      await openEvidencePaper(button.dataset.paperId);
+      return;
+    }
+    if (button.dataset.action !== "remove-project-paper" || !state.selectedProject) return;
+    if (!await confirmAction("移除项目论文", "只移除项目关系，不删除论文或研究卡片。", "移除")) return;
+    await api(`/api/projects/${state.selectedProject.id}/papers/${button.dataset.paperId}`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ confirm: true })
+    });
+    await loadSelectedProject(state.selectedProject);
+  } catch (error) {
+    setStatus(error.message);
+  }
+});
+
+workspaceElements.projectEvidence.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-action]");
+  if (!button) return;
+  try {
+    if (button.dataset.action === "open-evidence-paper") await openEvidencePaper(button.dataset.paperId);
+    if (button.dataset.action === "open-evidence-card") await openEvidencePaper(button.dataset.paperId, button.dataset.page);
+  } catch (error) {
+    setStatus(error.message);
+  }
+});
+
+document.querySelector("#addPaperToProjectButton").addEventListener("click", () => {
+  state.projectPaperDialogMode = "papers";
+  void openProjectPaperDialog().catch((error) => setStatus(error.message));
+});
+document.querySelector("#paperAddToProjectButton").addEventListener("click", () => {
+  void openProjectPickerForPaper().catch((error) => setStatus(error.message));
+});
+
+document.querySelector("#exportProjectEvidenceCsv").addEventListener("click", () => {
+  if (state.selectedProject) window.location.href = `/api/projects/${state.selectedProject.id}/evidence?format=csv`;
+});
+document.querySelector("#exportProjectEvidenceMarkdown").addEventListener("click", () => {
+  if (state.selectedProject) window.location.href = `/api/projects/${state.selectedProject.id}/evidence?format=markdown`;
+});
+
+document.querySelector("#projectForm").addEventListener("submit", async (event) => {
+  if (event.submitter?.value !== "confirm") return;
+  event.preventDefault();
+  const id = document.querySelector("#projectIdField").value;
+  const current = state.projects.find((project) => project.id === Number(id));
+  try {
+    const project = await api(id ? `/api/projects/${id}` : "/api/projects", {
+      method: id ? "PATCH" : "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: document.querySelector("#projectNameField").value,
+        description: document.querySelector("#projectDescriptionField").value,
+        status: document.querySelector("#projectStatusField").value,
+        ...(id ? { expectedVersion: current.version } : {})
+      })
+    });
+    document.querySelector("#projectDialog").close("confirm");
+    await loadProjects();
+    setStatus(id ? "项目已更新" : "项目已创建");
+    if (!id) await loadSelectedProject(project);
+  } catch (error) {
+    setStatus(error.message);
+  }
+});
+
+document.querySelector("#projectPaperForm").addEventListener("submit", async (event) => {
+  if (event.submitter?.value !== "confirm") return;
+  event.preventDefault();
+  const defaults = {
+    priority: Number(document.querySelector("#projectPaperPriorityField").value),
+    stance: document.querySelector("#projectPaperStanceField").value,
+    projectStatus: document.querySelector("#projectPaperStatusField").value,
+    projectNote: document.querySelector("#projectPaperNoteField").value
+  };
+  try {
+    if (state.projectPaperDialogMode === "projects") {
+      const projectIds = [...document.querySelectorAll("#projectPaperChoices [data-project-id]:checked")].map((input) => Number(input.dataset.projectId));
+      await Promise.all(projectIds.map((projectId) => api(`/api/projects/${projectId}/papers`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ paperIds: [state.selectedPaper.id], ...defaults })
+      })));
+    } else {
+      if (!state.selectedProject) return;
+      const paperIds = [...document.querySelectorAll("#projectPaperChoices [data-paper-id]:checked:not(:disabled)")].map((input) => Number(input.dataset.paperId));
+      if (paperIds.length) await api(`/api/projects/${state.selectedProject.id}/papers`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ paperIds, ...defaults })
+      });
+      await loadSelectedProject(state.selectedProject);
+    }
+    document.querySelector("#projectPaperDialog").close("confirm");
+    setStatus("项目关系已更新");
+  } catch (error) {
+    setStatus(error.message);
+  }
+});
 
 for (const [view, button] of Object.entries(viewButtons)) {
   button.addEventListener("click", () => void selectWorkspaceView(view));

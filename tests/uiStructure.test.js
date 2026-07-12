@@ -133,6 +133,28 @@ test("paper detail exposes metadata save and notes autosave wiring", async () =>
   assert.match(script, /NOTE_AUTOSAVE_DELAY_MS/);
 });
 
+test("task 6 exposes project workspace, dialogs, evidence exports, and project routes", async () => {
+  const html = await readFile("public/index.html", "utf8");
+  const script = await readFile("public/app.js", "utf8");
+  const css = await readFile("public/styles.css", "utf8");
+
+  for (const id of [
+    "projectsViewButton", "projectsView", "projectList", "projectStatusTabs", "projectEvidence",
+    "projectDialog", "projectForm", "addPaperToProjectButton", "projectPaperDialog",
+    "exportProjectEvidenceCsv", "exportProjectEvidenceMarkdown"
+  ]) assert.match(html, new RegExp(`id="${id}"`));
+  assert.match(html, /data-view="projects"/);
+  assert.match(script, /\/api\/projects/);
+  assert.match(script, /projectStatusTabs/);
+  assert.match(script, /projectEvidence/);
+  assert.match(script, /paperIds/);
+  assert.match(script, /projectPaperDialog/);
+  assert.match(script, /method:\s*"DELETE"/);
+  assert.match(css, /\.projects-workspace/);
+  assert.match(css, /\.project-evidence/);
+  assert.match(css, /@media \(max-width: 900px\)/);
+});
+
 test("frontend reader exposes page-linked annotation and research-card controls", async () => {
   const html = await readFile("public/index.html", "utf8");
   const script = await readFile("public/app.js", "utf8");

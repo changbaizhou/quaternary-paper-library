@@ -8,6 +8,11 @@ import {
   validateAnnotationInput,
   validateResearchCardInput
 } from "./annotations.js";
+import {
+  buildEvidenceRows,
+  normalizeProjectInput,
+  normalizeProjectPaperInput
+} from "./projects.js";
 
 const draftJsonFields = {
   authors: "authors_json",
@@ -210,6 +215,43 @@ function mapResearchCard(row) {
   };
 }
 
+function mapProject(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name,
+    description: row.description,
+    status: row.status,
+    version: row.version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function mapProjectPaper(row) {
+  if (!row) return null;
+  return {
+    projectId: row.project_id,
+    paperId: row.paper_id,
+    priority: row.priority,
+    stance: row.stance,
+    projectStatus: row.project_status,
+    projectNote: row.project_note,
+    paperStatus: row.deleted_at === null && row.merged_into_id === null ? "active" : "inactive",
+    citationKey: row.citation_key,
+    title: row.title,
+    authors: parseJson(row.authors_json, []),
+    year: row.year,
+    regions: parseJson(row.regions_json, []),
+    periods: parseJson(row.periods_json, []),
+    materials: parseJson(row.materials_json, []),
+    methods: parseJson(row.methods_json, []),
+    deletedAt: row.deleted_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
 function mapBackup(row) {
   if (!row) return null;
   return {
@@ -289,6 +331,32 @@ export class SearchQueryError extends Error {
     super("Search query is invalid");
     this.name = "SearchQueryError";
     this.status = 400;
+  }
+}
+
+export class ProjectNotFoundError extends Error {
+  constructor() {
+    super("Project not found");
+    this.name = "ProjectNotFoundError";
+    this.status = 404;
+  }
+}
+
+export class ProjectConflictError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ProjectConflictError";
+    this.status = 409;
+  }
+}
+
+export class ProjectVersionConflictError extends Error {
+  constructor(expected, actual) {
+    super(`Project version conflict: expected ${expected}, found ${actual}`);
+    this.name = "ProjectVersionConflictError";
+    this.status = 409;
+    this.expectedVersion = expected;
+    this.actualVersion = actual;
   }
 }
 
@@ -1408,6 +1476,242 @@ export class PaperRepository {
         ${where}
         ORDER BY page_number ASC, created_at ASC, id ASC
       `).all(...params).map(mapResearchCard);
+    });
+  }
+
+  createProject(input = {}) {
+    const fields = normalizeProjectInput(input);
+    return this.withDb((db) => {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        let result;
+        try {
+          result = db.prepare(`
+            INSERT INTO research_projects (name, description, status)
+            VALUES (?, ?, ?)
+          `).run(fields.name, fields.description, fields.status);
+        } catch (error) {
+          if (String(error.message).includes("UNIQUE")) throw new ProjectConflictError("Project name already exists");
+          throw error;
+        }
+        const project = mapProject(db.prepare("SELECT * FROM research_projects WHERE id = ?").get(Number(result.lastInsertRowid)));
+        db.exec("COMMIT");
+        return project;
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    });
+  }
+
+  listProjects(status) {
+    return this.withDb((db) => {
+      if (status !== undefined && status !== "active" && status !== "archived") throw new TypeError("status must be active or archived");
+      const rows = status === undefined
+        ? db.prepare("SELECT * FROM research_projects ORDER BY status ASC, updated_at DESC, id ASC").all()
+        : db.prepare("SELECT * FROM research_projects WHERE status = ? ORDER BY updated_at DESC, id ASC").all(status);
+      return rows.map(mapProject);
+    });
+  }
+
+  getProject(id) {
+    return this.withDb((db) => mapProject(db.prepare("SELECT * FROM research_projects WHERE id = ?").get(numericId(id, "projectId"))));
+  }
+
+  updateProject(id, changes = {}) {
+    const projectId = numericId(id, "projectId");
+    const version = expectedVersion(changes.expectedVersion);
+    const fields = normalizeProjectInput(changes, { partial: true });
+    return this.withDb((db) => {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const current = db.prepare("SELECT * FROM research_projects WHERE id = ?").get(projectId);
+        if (!current) {
+          db.exec("ROLLBACK");
+          return null;
+        }
+        if (version !== current.version) throw new ProjectVersionConflictError(version, current.version);
+        const next = {
+          name: fields.name ?? current.name,
+          description: fields.description ?? current.description,
+          status: fields.status ?? current.status
+        };
+        try {
+          db.prepare(`
+            UPDATE research_projects
+            SET name = ?, description = ?, status = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND version = ?
+          `).run(next.name, next.description, next.status, projectId, current.version);
+        } catch (error) {
+          if (String(error.message).includes("UNIQUE")) throw new ProjectConflictError("Project name already exists");
+          throw error;
+        }
+        const updated = mapProject(db.prepare("SELECT * FROM research_projects WHERE id = ?").get(projectId));
+        db.exec("COMMIT");
+        return updated;
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    });
+  }
+
+  archiveProject(id, options = {}) {
+    return this.updateProject(id, { expectedVersion: options.expectedVersion, status: "archived" });
+  }
+
+  deleteProject(id, { expectedVersion: expected } = {}) {
+    const projectId = numericId(id, "projectId");
+    const version = expected === undefined ? undefined : expectedVersion(expected);
+    return this.withDb((db) => {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const project = db.prepare("SELECT * FROM research_projects WHERE id = ?").get(projectId);
+        if (!project) {
+          db.exec("ROLLBACK");
+          return false;
+        }
+        if (version !== undefined && version !== project.version) throw new ProjectVersionConflictError(version, project.version);
+        db.prepare("DELETE FROM project_papers WHERE project_id = ?").run(projectId);
+        db.prepare("DELETE FROM research_projects WHERE id = ?").run(projectId);
+        db.exec("COMMIT");
+        return true;
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    });
+  }
+
+  listProjectPapers(projectId) {
+    const id = numericId(projectId, "projectId");
+    return this.withDb((db) => {
+      if (!db.prepare("SELECT 1 FROM research_projects WHERE id = ?").get(id)) return null;
+      return db.prepare(`
+        SELECT pp.*, p.citation_key, p.title, p.authors_json, p.year, p.regions_json, p.periods_json,
+          p.materials_json, p.methods_json, p.deleted_at, p.merged_into_id
+        FROM project_papers AS pp
+        JOIN papers AS p ON p.id = pp.paper_id
+        WHERE pp.project_id = ?
+        ORDER BY pp.priority ASC, p.citation_key ASC, p.title ASC, pp.paper_id ASC
+      `).all(id).map(mapProjectPaper);
+    });
+  }
+
+  addProjectPaper(projectId, paperId, defaults = {}) {
+    return this.addProjectPapers(projectId, [paperId], defaults)[0];
+  }
+
+  addProjectPapers(projectId, paperIds, defaults = {}) {
+    const projectIdValue = numericId(projectId, "projectId");
+    if (!Array.isArray(paperIds) || paperIds.length === 0) throw new TypeError("paperIds must be a non-empty array");
+    const ids = paperIds.map((id) => numericId(id, "paperId"));
+    if (new Set(ids).size !== ids.length) throw new ProjectConflictError("Duplicate paper relation");
+    const fields = normalizeProjectPaperInput(defaults);
+    return this.withDb((db) => {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        if (!db.prepare("SELECT 1 FROM research_projects WHERE id = ?").get(projectIdValue)) throw new ProjectNotFoundError();
+        const placeholders = ids.map(() => "?").join(", ");
+        const papers = db.prepare(`SELECT id, deleted_at, merged_into_id FROM papers WHERE id IN (${placeholders})`).all(...ids);
+        if (papers.length !== ids.length) throw new PaperNotFoundError();
+        if (papers.some((paper) => paper.deleted_at !== null || paper.merged_into_id !== null)) throw new PaperStateError("Paper must be active before adding to a project");
+        const existing = db.prepare(`SELECT paper_id FROM project_papers WHERE project_id = ? AND paper_id IN (${placeholders})`).all(projectIdValue, ...ids);
+        if (existing.length) throw new ProjectConflictError("Paper is already in project");
+        const insert = db.prepare(`
+          INSERT INTO project_papers (project_id, paper_id, priority, stance, project_status, project_note)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `);
+        for (const paperId of ids) insert.run(projectIdValue, paperId, fields.priority, fields.stance, fields.projectStatus, fields.projectNote);
+        const rows = db.prepare(`
+          SELECT pp.*, p.citation_key, p.title, p.authors_json, p.year, p.regions_json, p.periods_json,
+            p.materials_json, p.methods_json, p.deleted_at, p.merged_into_id
+          FROM project_papers AS pp JOIN papers AS p ON p.id = pp.paper_id
+          WHERE pp.project_id = ? AND pp.paper_id IN (${placeholders})
+          ORDER BY pp.paper_id ASC
+        `).all(projectIdValue, ...ids).map(mapProjectPaper);
+        db.exec("COMMIT");
+        return rows;
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    });
+  }
+
+  updateProjectPaper(projectId, paperId, changes = {}) {
+    const projectIdValue = numericId(projectId, "projectId");
+    const paperIdValue = numericId(paperId, "paperId");
+    const fields = normalizeProjectPaperInput(changes, { partial: true });
+    return this.withDb((db) => {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const current = db.prepare("SELECT * FROM project_papers WHERE project_id = ? AND paper_id = ?").get(projectIdValue, paperIdValue);
+        if (!current) {
+          db.exec("ROLLBACK");
+          return null;
+        }
+        db.prepare(`
+          UPDATE project_papers
+          SET priority = ?, stance = ?, project_status = ?, project_note = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE project_id = ? AND paper_id = ?
+        `).run(fields.priority ?? current.priority, fields.stance ?? current.stance, fields.projectStatus ?? current.project_status, fields.projectNote ?? current.project_note, projectIdValue, paperIdValue);
+        const row = db.prepare(`
+          SELECT pp.*, p.citation_key, p.title, p.authors_json, p.year, p.regions_json, p.periods_json,
+            p.materials_json, p.methods_json, p.deleted_at, p.merged_into_id
+          FROM project_papers AS pp JOIN papers AS p ON p.id = pp.paper_id
+          WHERE pp.project_id = ? AND pp.paper_id = ?
+        `).get(projectIdValue, paperIdValue);
+        db.exec("COMMIT");
+        return mapProjectPaper(row);
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    });
+  }
+
+  removeProjectPaper(projectId, paperId) {
+    const projectIdValue = numericId(projectId, "projectId");
+    const paperIdValue = numericId(paperId, "paperId");
+    return this.withDb((db) => Number(db.prepare("DELETE FROM project_papers WHERE project_id = ? AND paper_id = ?").run(projectIdValue, paperIdValue).changes) === 1);
+  }
+
+  getProjectEvidence(projectId) {
+    const id = numericId(projectId, "projectId");
+    return this.withDb((db) => {
+      if (!db.prepare("SELECT 1 FROM research_projects WHERE id = ?").get(id)) return null;
+      const rows = db.prepare(`
+        SELECT pp.project_id, pp.paper_id, pp.priority, pp.stance, pp.project_status, pp.project_note,
+          p.citation_key, p.title, p.authors_json, p.year, p.regions_json, p.periods_json,
+          p.materials_json, p.methods_json, p.deleted_at, p.merged_into_id,
+          rc.id AS card_id, rc.page_number AS card_page_number, rc.quote_text AS card_quote_text,
+          rc.summary AS card_summary, rc.evidence_type AS card_evidence_type
+        FROM project_papers AS pp
+        JOIN papers AS p ON p.id = pp.paper_id
+        LEFT JOIN research_cards AS rc ON rc.paper_id = pp.paper_id
+        WHERE pp.project_id = ?
+        ORDER BY pp.priority ASC, p.citation_key ASC, p.title ASC, pp.paper_id ASC,
+          rc.page_number ASC, rc.id ASC
+      `).all(id);
+      const projectPapers = [];
+      const papers = [];
+      const researchCards = [];
+      const relationKeys = new Set();
+      const paperKeys = new Set();
+      for (const row of rows) {
+        const relationKey = `${row.project_id}:${row.paper_id}`;
+        if (!relationKeys.has(relationKey)) {
+          relationKeys.add(relationKey);
+          projectPapers.push({ projectId: row.project_id, paperId: row.paper_id, priority: row.priority, stance: row.stance, projectStatus: row.project_status, projectNote: row.project_note });
+        }
+        if (!paperKeys.has(row.paper_id)) {
+          paperKeys.add(row.paper_id);
+          papers.push({ id: row.paper_id, citationKey: row.citation_key, title: row.title, authors: parseJson(row.authors_json, []), year: row.year, regions: parseJson(row.regions_json, []), periods: parseJson(row.periods_json, []), materials: parseJson(row.materials_json, []), methods: parseJson(row.methods_json, []), deletedAt: row.deleted_at, mergedIntoId: row.merged_into_id });
+        }
+        if (row.card_id !== null) researchCards.push({ id: row.card_id, paperId: row.paper_id, pageNumber: row.card_page_number, quoteText: row.card_quote_text, summary: row.card_summary, evidenceType: row.card_evidence_type });
+      }
+      return buildEvidenceRows({ projectPapers, papers, researchCards });
     });
   }
 

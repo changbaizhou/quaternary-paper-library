@@ -1675,6 +1675,95 @@ test("annotation and research-card API enforces page, confirmation, version, and
   });
 });
 
+test("project API supports batch relations, evidence exports, conflicts, and confirmations", async () => {
+  await withServer(async (baseUrl, { dbPath }) => {
+    const repo = new PaperRepository(dbPath);
+    const createPaper = (title) => repo.confirmDraft(repo.createDraft({
+      title,
+      authors: ["Author"],
+      classification: { regions: ["North"], periods: ["Holocene"], materials: ["core"], methods: ["pollen"] },
+      confidence: {},
+      evidence: {}
+    }));
+    const firstId = createPaper("Project paper one");
+    const secondId = createPaper("Project paper two");
+
+    const created = await fetch(`${baseUrl}/api/projects`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "API project", description: "Evidence project" })
+    });
+    assert.equal(created.status, 201);
+    const project = await created.json();
+    assert.equal(project.status, "active");
+
+    const added = await fetch(`${baseUrl}/api/projects/${project.id}/papers`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ paperIds: [firstId, secondId], priority: 2, stance: "supports", projectStatus: "queued" })
+    });
+    assert.equal(added.status, 201);
+    assert.equal((await added.json()).length, 2);
+    assert.equal((await fetch(`${baseUrl}/api/projects/${project.id}/papers`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ paperIds: [firstId] })
+    })).status, 409);
+
+    const invalid = await fetch(`${baseUrl}/api/projects/${project.id}/papers/${firstId}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ priority: 9 })
+    });
+    assert.equal(invalid.status, 400);
+
+    const stale = await fetch(`${baseUrl}/api/projects/${project.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "stale", expectedVersion: 99 })
+    });
+    assert.equal(stale.status, 409);
+
+    const evidence = await fetch(`${baseUrl}/api/projects/${project.id}/evidence?format=json`);
+    assert.equal(evidence.status, 200);
+    assert.equal((await evidence.json()).length, 2);
+    const csv = await fetch(`${baseUrl}/api/projects/${project.id}/evidence?format=csv`);
+    assert.equal(csv.status, 200);
+    assert.match(csv.headers.get("content-disposition"), /project-evidence\.csv/);
+    assert.match(await csv.text(), /citationKey/);
+    const markdown = await fetch(`${baseUrl}/api/projects/${project.id}/evidence?format=markdown`);
+    assert.equal(markdown.status, 200);
+    assert.match(await markdown.text(), /Project paper one/);
+
+    const missingDeleteConfirm = await fetch(`${baseUrl}/api/projects/${project.id}/papers/${firstId}`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({})
+    });
+    assert.equal(missingDeleteConfirm.status, 400);
+    const removed = await fetch(`${baseUrl}/api/projects/${project.id}/papers/${firstId}`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ confirm: true })
+    });
+    assert.equal(removed.status, 200);
+
+    const missingProjectConfirm = await fetch(`${baseUrl}/api/projects/${project.id}`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({})
+    });
+    assert.equal(missingProjectConfirm.status, 400);
+    const deleted = await fetch(`${baseUrl}/api/projects/${project.id}`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ confirm: true })
+    });
+    assert.equal(deleted.status, 200);
+    assert.equal(repo.getPaper(secondId).title, "Project paper two");
+  });
+});
+
 test("search API validates parameters, applies filters, and never leaks FTS errors", async () => {
   await withServer(async (baseUrl, { dbPath }) => {
     const repo = new PaperRepository(dbPath);

@@ -49,6 +49,7 @@ import {
 } from "./repository.js";
 import { classifyText } from "./taxonomy.js";
 import { translateText, TranslationError } from "./translation.js";
+import { exportProjectEvidenceCsv, exportProjectEvidenceMarkdown } from "./projects.js";
 
 const upload = multer({ storage: multer.memoryStorage() });
 const arrayPaperFields = new Set([
@@ -443,6 +444,53 @@ function publicResearchCard(card) {
   };
 }
 
+function publicProject(project) {
+  return {
+    id: project.id,
+    name: project.name,
+    description: project.description,
+    status: project.status,
+    version: project.version,
+    createdAt: project.createdAt,
+    updatedAt: project.updatedAt
+  };
+}
+
+function publicProjectPaper(projectPaper) {
+  return {
+    projectId: projectPaper.projectId,
+    paperId: projectPaper.paperId,
+    priority: projectPaper.priority,
+    stance: projectPaper.stance,
+    projectStatus: projectPaper.projectStatus,
+    projectNote: projectPaper.projectNote,
+    paperStatus: projectPaper.paperStatus,
+    citationKey: projectPaper.citationKey,
+    title: projectPaper.title,
+    authors: projectPaper.authors,
+    year: projectPaper.year,
+    deletedAt: projectPaper.deletedAt,
+    createdAt: projectPaper.createdAt,
+    updatedAt: projectPaper.updatedAt
+  };
+}
+
+function sendProjectError(error, response, next) {
+  if (error.status === 400 || error.status === 404 || error.status === 409 || error instanceof TypeError) {
+    response.status(error.status || 400).json({ error: error.message });
+    return;
+  }
+  if (error instanceof PaperNotFoundError) {
+    response.status(404).json({ error: error.message });
+    return;
+  }
+  if (error instanceof PaperStateError) {
+    response.status(409).json({ error: error.message });
+    return;
+  }
+  next(error);
+}
+
 export function createPaperIndexService({
   repo,
   filesDir,
@@ -600,6 +648,144 @@ export function createApp(options = {}) {
 
   app.get("/api/health", (_request, response) => {
     response.json({ ok: true });
+  });
+
+  app.get("/api/projects", (request, response, next) => {
+    try {
+      response.json(repo.listProjects(request.query.status));
+    } catch (error) {
+      sendProjectError(error, response, next);
+    }
+  });
+
+  app.post("/api/projects", (request, response, next) => {
+    try {
+      response.status(201).json(publicProject(repo.createProject(request.body || {})));
+    } catch (error) {
+      sendProjectError(error, response, next);
+    }
+  });
+
+  app.get("/api/projects/:id", (request, response, next) => {
+    try {
+      const project = repo.getProject(request.params.id);
+      if (!project) {
+        response.status(404).json({ error: "Project not found" });
+        return;
+      }
+      response.json(publicProject(project));
+    } catch (error) {
+      sendProjectError(error, response, next);
+    }
+  });
+
+  app.patch("/api/projects/:id", (request, response, next) => {
+    try {
+      const project = repo.updateProject(request.params.id, request.body || {});
+      if (!project) {
+        response.status(404).json({ error: "Project not found" });
+        return;
+      }
+      response.json(publicProject(project));
+    } catch (error) {
+      sendProjectError(error, response, next);
+    }
+  });
+
+  app.delete("/api/projects/:id", (request, response, next) => {
+    try {
+      if (request.body?.confirm !== true) {
+        response.status(400).json({ error: "Project deletion confirmation is required" });
+        return;
+      }
+      const deleted = repo.deleteProject(request.params.id, { expectedVersion: request.body.expectedVersion });
+      if (!deleted) {
+        response.status(404).json({ error: "Project not found" });
+        return;
+      }
+      response.json({ deleted: true });
+    } catch (error) {
+      sendProjectError(error, response, next);
+    }
+  });
+
+  app.get("/api/projects/:id/papers", (request, response, next) => {
+    try {
+      const papers = repo.listProjectPapers(request.params.id);
+      if (papers === null) {
+        response.status(404).json({ error: "Project not found" });
+        return;
+      }
+      response.json(papers.map(publicProjectPaper));
+    } catch (error) {
+      sendProjectError(error, response, next);
+    }
+  });
+
+  app.post("/api/projects/:id/papers", (request, response, next) => {
+    try {
+      const body = request.body || {};
+      const { paperIds, ...defaults } = body;
+      response.status(201).json(repo.addProjectPapers(request.params.id, paperIds, defaults).map(publicProjectPaper));
+    } catch (error) {
+      sendProjectError(error, response, next);
+    }
+  });
+
+  app.patch("/api/projects/:id/papers/:paperId", (request, response, next) => {
+    try {
+      const relation = repo.updateProjectPaper(request.params.id, request.params.paperId, request.body || {});
+      if (!relation) {
+        response.status(404).json({ error: "Project paper relation not found" });
+        return;
+      }
+      response.json(publicProjectPaper(relation));
+    } catch (error) {
+      sendProjectError(error, response, next);
+    }
+  });
+
+  app.delete("/api/projects/:id/papers/:paperId", (request, response, next) => {
+    try {
+      if (request.body?.confirm !== true) {
+        response.status(400).json({ error: "Project paper removal confirmation is required" });
+        return;
+      }
+      const removed = repo.removeProjectPaper(request.params.id, request.params.paperId);
+      if (!removed) {
+        response.status(404).json({ error: "Project paper relation not found" });
+        return;
+      }
+      response.json({ removed: true });
+    } catch (error) {
+      sendProjectError(error, response, next);
+    }
+  });
+
+  app.get("/api/projects/:id/evidence", (request, response, next) => {
+    try {
+      const format = request.query.format || "json";
+      const rows = repo.getProjectEvidence(request.params.id);
+      if (rows === null) {
+        response.status(404).json({ error: "Project not found" });
+        return;
+      }
+      if (format === "json") {
+        response.json(rows);
+        return;
+      }
+      if (format === "csv") {
+        response.type("text/csv").set("Content-Disposition", "attachment; filename=\"project-evidence.csv\"").send(exportProjectEvidenceCsv(rows));
+        return;
+      }
+      if (format === "markdown") {
+        response.type("text/markdown").set("Content-Disposition", "attachment; filename=\"project-evidence.md\"").send(exportProjectEvidenceMarkdown(rows));
+        return;
+      }
+      response.status(400).json({ error: "Unsupported project evidence format" });
+    } catch (error) {
+      sendProjectError(error, response, next);
+    }
   });
 
   app.get("/api/backups", (_request, response) => {
