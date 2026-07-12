@@ -138,7 +138,29 @@ test.afterAll(async () => {
 test.describe.serial("research workspace acceptance", () => {
   test("desktop completes indexing, retrieval, reading, evidence, AI, and recycle-bin workflows", async ({ page }, testInfo) => {
     await page.setViewportSize({ width: 1366, height: 768 });
+    const maliciousTitle = '<img src=x onerror="window.__draftXssExecuted += 1">Title';
+    const maliciousDoi = '<img src=x onerror="window.__draftXssExecuted += 1">10.1000/xss';
+    let draftsIntercepted = false;
+    await page.addInitScript(() => { window.__draftXssExecuted = 0; });
+    await page.route("**/api/drafts", async (route) => {
+      if (draftsIntercepted || route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      draftsIntercepted = true;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([{ id: 999, status: "pending", originalFilename: "safe.pdf", title: maliciousTitle, doi: maliciousDoi }])
+      });
+    });
     await page.goto(`${baseURL}/`);
+    await expect(page.locator("#draftList .draft-title")).toHaveText(maliciousTitle);
+    await expect(page.locator("#draftList .meta-line")).toHaveText(maliciousDoi);
+    await expect(page.locator("#draftList img")).toHaveCount(0);
+    await page.waitForTimeout(100);
+    expect(await page.evaluate(() => window.__draftXssExecuted)).toBe(0);
+    await page.unroute("**/api/drafts");
 
     await page.locator("#pdfInput").setInputFiles({ name: "research-workspace.pdf", mimeType: "application/pdf", buffer: pdfBytes });
     await page.locator("#uploadForm").evaluate((form) => form.requestSubmit());

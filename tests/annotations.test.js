@@ -133,6 +133,14 @@ test("repository enforces active indexed pages and supports annotation/card CRUD
       comment: "updated"
     });
     assert.equal(updated.comment, "updated");
+    assert.deepEqual(updated.textSelector, {
+      quote: "quote",
+      prefix: "",
+      suffix: "",
+      start: 7,
+      end: 12,
+      positionVerified: true
+    });
     assert.equal(updated.version, 2);
     assert.throws(
       () => repo.updateAnnotation(annotation.id, { expectedVersion: 1, comment: "stale" }),

@@ -208,7 +208,6 @@ test("repository rejects merged records from purge and editing", async () => {
     }
 
     assert.throws(() => repo.purgePaper(paperId), /Merged paper cannot be purged/);
-    assert.throws(() => repo.purgeAllTrashedPapers(), /Merged paper cannot be purged/);
     assert.throws(
       () => repo.updatePaper(paperId, { expectedVersion: 1, title: "Blocked merged edit" }),
       /Paper must be active before editing/
@@ -218,6 +217,48 @@ test("repository rejects merged records from purge and editing", async () => {
       /Paper must be active before updating reading progress/
     );
     assert.equal(repo.getPaper(paperId).title, "Merged paper");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("repository purges only visible trashed papers and keeps merged records", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-repo-"));
+  const dbPath = path.join(dir, "library.sqlite");
+
+  try {
+    initDb(dbPath);
+    const repo = new PaperRepository(dbPath);
+    const createPaper = (title) => repo.confirmDraft(repo.createDraft({
+      title,
+      classification: {},
+      confidence: {},
+      evidence: {}
+    }));
+    const targetId = createPaper("Merge target");
+    const sourceId = createPaper("Merge source");
+    const trashId = createPaper("Visible trash");
+    const backup = repo.createBackupRecord({
+      backupType: "database",
+      storedPath: path.join(dir, "backup"),
+      createdAt: new Date().toISOString()
+    });
+
+    repo.mergePapers(targetId, sourceId, backup.id);
+    repo.trashPaper(trashId);
+
+    const purged = repo.purgeAllTrashedPapers();
+    assert.deepEqual(purged.papers.map((paper) => paper.id), [trashId]);
+    assert.equal(repo.getPaper(trashId), null);
+    assert.equal(repo.getPaper(targetId).id, targetId);
+
+    const db = openDb(dbPath);
+    try {
+      assert.equal(db.prepare("SELECT merged_into_id FROM papers WHERE id = ?").get(sourceId).merged_into_id, targetId);
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM paper_merge_log WHERE source_paper_id = ?").get(sourceId).count, 1);
+    } finally {
+      db.close();
+    }
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

@@ -1094,8 +1094,8 @@ function renderDrafts() {
       (draft) => `
         <button class="draft-item" data-draft-id="${draft.id}">
           <span class="draft-badge">待确认</span>
-          <h3 class="draft-title">${draft.title || draft.originalFilename || "未识别题名"}</h3>
-          <div class="meta-line">${draft.doi || "未识别 DOI"}</div>
+          <h3 class="draft-title">${escapeHtml(draft.title || draft.originalFilename || "未识别题名")}</h3>
+          <div class="meta-line">${escapeHtml(draft.doi || "未识别 DOI")}</div>
         </button>
       `
     )

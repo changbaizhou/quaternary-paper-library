@@ -1436,7 +1436,7 @@ export class PaperRepository {
           comment: changes.comment === undefined ? current.comment : changes.comment,
           textSelector: changes.textSelector === undefined ? JSON.parse(current.text_selector_json || "{}") : changes.textSelector
         });
-        const selector = annotationSelector(changes.textSelector, fields.quoteText, page);
+        const selector = annotationSelector(fields.textSelector, fields.quoteText, page);
         db.prepare(`
           UPDATE annotations
           SET paper_id = ?, page_number = ?, kind = ?, quote_text = ?, translated_text = ?,
@@ -2241,11 +2241,8 @@ export class PaperRepository {
       db.exec("BEGIN IMMEDIATE");
       try {
         const rows = db
-          .prepare("SELECT * FROM papers WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC, id DESC")
+          .prepare("SELECT * FROM papers WHERE deleted_at IS NOT NULL AND merged_into_id IS NULL ORDER BY deleted_at DESC, id DESC")
           .all();
-        if (rows.some((row) => row.merged_into_id !== null)) {
-          throw new PaperStateError("Merged paper cannot be purged");
-        }
 
         const papers = rows.map(mapPaper);
         const storedPaths = [];

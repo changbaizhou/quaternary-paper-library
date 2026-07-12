@@ -31,7 +31,7 @@ function authorFamily(author) {
   if (value.includes(",")) return keyPart(value.split(",", 1)[0], "author");
   if (isCjk(value)) return keyPart(value.replace(/\s+/g, ""), "author");
   const parts = value.split(/\s+/).filter(Boolean);
-  return keyPart(parts[0] || value, "author");
+  return keyPart(parts.at(-1) || value, "author");
 }
 
 function authorParts(author) {

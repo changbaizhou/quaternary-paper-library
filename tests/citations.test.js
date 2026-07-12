@@ -32,6 +32,8 @@ const paper = {
 
 test("generates stable unique keys for English, Chinese, missing authors, and collisions", () => {
   assert.equal(generateCitationKey({ authors: ["Smith, Jane"], year: 2024, title: "The Great Study" }, []), "smith2024the");
+  assert.equal(generateCitationKey({ authors: ["Jane Doe"], year: 2024, title: "The Great Study" }, []), "doe2024the");
+  assert.equal(generateCitationKey({ authors: ["Jean-Claude van der Waals"], year: 2024, title: "The Great Study" }, []), "waals2024the");
   assert.equal(generateCitationKey({ authors: ["Smith, Jane"], year: 2024, title: "The Great Study" }, ["smith2024the"]), "smith2024thea");
   assert.equal(generateCitationKey({ citationKey: "kept-key", authors: ["Other"], year: 2020, title: "Changed" }, ["kept-key"]), "kept-key");
   assert.match(generateCitationKey({ authors: ["张三"], year: 2020, title: "青藏高原湖泊沉积研究" }, []), /^张三2020/);

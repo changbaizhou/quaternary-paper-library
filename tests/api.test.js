@@ -1214,8 +1214,9 @@ test("API returns 409 when editing trashed or merged papers", async () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ confirm: true })
     });
-    assert.equal(mergedFullPurge.status, 409);
-    assert.match((await mergedFullPurge.json()).error, /cannot be purged/);
+    assert.equal(mergedFullPurge.status, 200);
+    assert.deepEqual((await mergedFullPurge.json()).papers.map((paper) => paper.id), [trashedId]);
+    assert.equal(repo.getPaper(mergedId).mergedIntoId, 999);
   });
 });
 
@@ -1627,6 +1628,21 @@ test("annotation and research-card API enforces page, confirmation, version, and
     assert.equal(annotation.version, 1);
     assert.equal("storedPath" in annotation, false);
     assert.equal(JSON.stringify(annotation).includes(dbPath), false);
+
+    const updatedAnnotation = await fetch(`${baseUrl}/api/annotations/${annotation.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expectedVersion: 1, comment: "updated comment" })
+    });
+    assert.equal(updatedAnnotation.status, 200);
+    assert.deepEqual((await updatedAnnotation.json()).textSelector, {
+      quote: "quote",
+      prefix: "prefix ",
+      suffix: " suffix",
+      start: 7,
+      end: 12,
+      positionVerified: true
+    });
 
     const card = await fetch(`${baseUrl}/api/research-cards`, {
       method: "POST",

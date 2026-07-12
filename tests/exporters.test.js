@@ -25,7 +25,7 @@ const paper = {
 test("exportBibtex contains core fields", () => {
   const bibtex = exportBibtex([paper]);
 
-  assert.match(bibtex, /@article\{li2026holocene/);
+  assert.match(bibtex, /@article\{wei2026holocene/);
   assert.match(bibtex, /title = \{Holocene lake sediment record\}/);
   assert.match(bibtex, /doi = \{10.1000\/test\}/);
 });
