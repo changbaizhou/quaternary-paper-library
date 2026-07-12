@@ -184,6 +184,35 @@ test.describe.serial("Task 9 data foundation smoke", () => {
       expect(control.left, `${control.tag}#${control.id} starts outside viewport`).toBeGreaterThanOrEqual(0);
       expect(control.right, `${control.tag}#${control.id} ends outside viewport`).toBeLessThanOrEqual(layout.viewportWidth);
     }
+
+    await page.locator("#paperList .paper-item").filter({ hasText: paperTitle }).click();
+    await expect(page.locator("#readerView")).toBeVisible();
+    await page.locator("#backToListButton").click();
+    await expect(page.locator("#trashPaperButton")).toBeEnabled();
+
+    const deleteRequests = [];
+    page.on("request", (request) => {
+      if (request.method() === "DELETE" && request.url().includes("/api/papers/")) deleteRequests.push(request.url());
+    });
+    await page.locator("#trashPaperButton").click();
+    await expect(page.locator("#trashPaperDialog")).toBeVisible();
+    await expect(page.locator("#trashPaperDialog")).toContainText(paperTitle);
+
+    const dialogLayout = await page.locator("#trashPaperDialog, #trashPaperDialog button:visible").evaluateAll((elements) => ({
+      viewportWidth: window.innerWidth,
+      controls: elements.map((element) => {
+        const rect = element.getBoundingClientRect();
+        return { id: element.id, left: rect.left, right: rect.right };
+      })
+    }));
+    expect(dialogLayout.controls.length).toBe(3);
+    for (const control of dialogLayout.controls) {
+      expect(control.left, `#${control.id} starts outside viewport`).toBeGreaterThanOrEqual(0);
+      expect(control.right, `#${control.id} ends outside viewport`).toBeLessThanOrEqual(dialogLayout.viewportWidth);
+    }
+    await page.locator("#trashPaperDialogCancel").click();
+    expect(deleteRequests).toHaveLength(0);
+    await expect(page.locator("#paperList .paper-item").filter({ hasText: paperTitle })).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath("mobile-data-foundation.png"), fullPage: true });
   });
 });
