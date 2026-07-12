@@ -202,6 +202,47 @@ const migrations = [
         END;
       `);
     }
+  },
+  {
+    version: 4,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS annotations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          paper_id INTEGER NOT NULL,
+          page_number INTEGER NOT NULL CHECK (page_number > 0),
+          kind TEXT NOT NULL CHECK (kind IN ('highlight', 'note', 'quote')),
+          quote_text TEXT NOT NULL,
+          translated_text TEXT NOT NULL DEFAULT '',
+          comment TEXT NOT NULL DEFAULT '',
+          color TEXT NOT NULL DEFAULT 'yellow',
+          text_selector_json TEXT NOT NULL DEFAULT '{}',
+          version INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_annotations_paper_page
+          ON annotations (paper_id, page_number);
+
+        CREATE TABLE IF NOT EXISTS research_cards (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          annotation_id INTEGER,
+          paper_id INTEGER NOT NULL,
+          page_number INTEGER NOT NULL CHECK (page_number > 0),
+          quote_text TEXT NOT NULL,
+          translated_text TEXT NOT NULL DEFAULT '',
+          summary TEXT NOT NULL DEFAULT '',
+          personal_interpretation TEXT NOT NULL DEFAULT '',
+          themes_json TEXT NOT NULL DEFAULT '[]',
+          evidence_type TEXT NOT NULL CHECK (evidence_type IN ('supports', 'opposes', 'method', 'background', 'uncertain')),
+          version INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_research_cards_paper_annotation
+          ON research_cards (paper_id, annotation_id);
+      `);
+    }
   }
 ];
 

@@ -2,6 +2,11 @@ import { openDb } from "./database.js";
 import { mergePaperData, metadataFields, noteFields } from "./paperData.js";
 import { normalizeDoi, normalizeTitle, titleBigrams, titleSimilarity } from "./duplicates.js";
 import { buildSearchQuery, matchesSearchGroups } from "./search.js";
+import {
+  normalizeTextSelector,
+  validateAnnotationInput,
+  validateResearchCardInput
+} from "./annotations.js";
 
 const draftJsonFields = {
   authors: "authors_json",
@@ -141,6 +146,49 @@ function mapPaperPage(row) {
     source: row.text_source,
     language: row.language,
     characterCount: row.character_count,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function mapAnnotation(row) {
+  if (!row) return null;
+  let textSelector = {};
+  try {
+    textSelector = JSON.parse(row.text_selector_json || "{}");
+  } catch {
+    textSelector = {};
+  }
+  return {
+    id: row.id,
+    paperId: row.paper_id,
+    pageNumber: row.page_number,
+    kind: row.kind,
+    quoteText: row.quote_text,
+    translatedText: row.translated_text,
+    comment: row.comment,
+    color: row.color,
+    textSelector,
+    version: row.version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function mapResearchCard(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    annotationId: row.annotation_id,
+    paperId: row.paper_id,
+    pageNumber: row.page_number,
+    quoteText: row.quote_text,
+    translatedText: row.translated_text,
+    summary: row.summary,
+    personalInterpretation: row.personal_interpretation,
+    themes: parseJson(row.themes_json, []),
+    evidenceType: row.evidence_type,
+    version: row.version,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
@@ -573,6 +621,36 @@ function makeSearchText(paper) {
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
+}
+
+function expectedVersion(value) {
+  if (!Number.isInteger(value) || value < 1) {
+    throw new TypeError("expectedVersion must be a positive integer");
+  }
+  return value;
+}
+
+function requireActiveIndexedPage(db, paperId, pageNumber) {
+  const paper = db.prepare(
+    "SELECT deleted_at, merged_into_id FROM papers WHERE id = ?"
+  ).get(paperId);
+  if (!paper) throw new PaperNotFoundError();
+  if (paper.deleted_at !== null || paper.merged_into_id !== null) {
+    throw new PaperStateError("Paper must be active before editing annotations");
+  }
+  const page = db.prepare(
+    "SELECT * FROM paper_pages WHERE paper_id = ? AND page_number = ?"
+  ).get(paperId, pageNumber);
+  if (!page) throw new RangeError("Page is not indexed for this paper");
+  return page;
+}
+
+function annotationSelector(input, quoteText, page) {
+  const source = input || { quote: quoteText };
+  if (source.quote !== undefined && source.quote !== quoteText) {
+    throw new TypeError("textSelector.quote must match quoteText");
+  }
+  return normalizeTextSelector({ ...source, quote: quoteText, pageText: page.text });
 }
 
 const searchScopes = new Set(["all", "metadata", "fulltext", "notes"]);
@@ -1141,6 +1219,272 @@ export class PaperRepository {
       FROM paper_pages
       WHERE paper_id = ? AND page_number = ?
     `).get(Number(paperId), normalizedPage)));
+  }
+
+  listAnnotations(paperId) {
+    return this.withDb((db) => {
+      const params = [];
+      let where = "";
+      if (paperId !== undefined && paperId !== null) {
+        params.push(numericId(paperId, "paperId"));
+        where = "WHERE paper_id = ?";
+      }
+      return db.prepare(`
+        SELECT * FROM annotations
+        ${where}
+        ORDER BY page_number ASC, created_at ASC, id ASC
+      `).all(...params).map(mapAnnotation);
+    });
+  }
+
+  createAnnotation(input = {}) {
+    return this.withDb((db) => {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const paperId = numericId(input.paperId, "paperId");
+        const pageNumber = normalizePageNumber(input.pageNumber);
+        const page = requireActiveIndexedPage(db, paperId, pageNumber);
+        const fields = validateAnnotationInput(input);
+        const selector = annotationSelector(input.textSelector, fields.quoteText, page);
+        const result = db.prepare(`
+          INSERT INTO annotations (
+            paper_id, page_number, kind, quote_text, translated_text, comment, color,
+            text_selector_json
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          paperId,
+          pageNumber,
+          fields.kind,
+          fields.quoteText,
+          fields.translatedText,
+          fields.comment,
+          fields.color,
+          toJson(selector, {})
+        );
+        const annotation = mapAnnotation(db.prepare("SELECT * FROM annotations WHERE id = ?").get(Number(result.lastInsertRowid)));
+        db.exec("COMMIT");
+        return annotation;
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    });
+  }
+
+  updateAnnotation(id, changes = {}) {
+    return this.withDb((db) => {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const annotationId = numericId(id, "annotationId");
+        const current = db.prepare("SELECT * FROM annotations WHERE id = ?").get(annotationId);
+        if (!current) {
+          db.exec("ROLLBACK");
+          return null;
+        }
+        if (expectedVersion(changes.expectedVersion) !== current.version) {
+          throw new VersionConflictError(changes.expectedVersion, current.version);
+        }
+        const paperId = changes.paperId === undefined ? current.paper_id : numericId(changes.paperId, "paperId");
+        const pageNumber = changes.pageNumber === undefined ? current.page_number : normalizePageNumber(changes.pageNumber);
+        const page = requireActiveIndexedPage(db, paperId, pageNumber);
+        const fields = validateAnnotationInput({
+          kind: changes.kind === undefined ? current.kind : changes.kind,
+          color: changes.color === undefined ? current.color : changes.color,
+          quoteText: changes.quoteText === undefined ? current.quote_text : changes.quoteText,
+          translatedText: changes.translatedText === undefined ? current.translated_text : changes.translatedText,
+          comment: changes.comment === undefined ? current.comment : changes.comment,
+          textSelector: changes.textSelector === undefined ? JSON.parse(current.text_selector_json || "{}") : changes.textSelector
+        });
+        const selector = annotationSelector(changes.textSelector, fields.quoteText, page);
+        db.prepare(`
+          UPDATE annotations
+          SET paper_id = ?, page_number = ?, kind = ?, quote_text = ?, translated_text = ?,
+              comment = ?, color = ?, text_selector_json = ?, version = version + 1,
+              updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND version = ?
+        `).run(
+          paperId,
+          pageNumber,
+          fields.kind,
+          fields.quoteText,
+          fields.translatedText,
+          fields.comment,
+          fields.color,
+          toJson(selector, {}),
+          annotationId,
+          current.version
+        );
+        const updated = mapAnnotation(db.prepare("SELECT * FROM annotations WHERE id = ?").get(annotationId));
+        db.exec("COMMIT");
+        return updated;
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    });
+  }
+
+  deleteAnnotation(id) {
+    return this.withDb((db) => {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const annotationId = numericId(id, "annotationId");
+        const annotation = db.prepare(
+          "SELECT paper_id, page_number FROM annotations WHERE id = ?"
+        ).get(annotationId);
+        if (annotation) requireActiveIndexedPage(db, annotation.paper_id, annotation.page_number);
+        db.prepare("UPDATE research_cards SET annotation_id = NULL WHERE annotation_id = ?").run(annotationId);
+        const deleted = Number(db.prepare("DELETE FROM annotations WHERE id = ?").run(annotationId).changes) === 1;
+        db.exec("COMMIT");
+        return deleted;
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    });
+  }
+
+  listResearchCards(paperId) {
+    return this.withDb((db) => {
+      const params = [];
+      let where = "";
+      if (paperId !== undefined && paperId !== null) {
+        params.push(numericId(paperId, "paperId"));
+        where = "WHERE paper_id = ?";
+      }
+      return db.prepare(`
+        SELECT * FROM research_cards
+        ${where}
+        ORDER BY page_number ASC, created_at ASC, id ASC
+      `).all(...params).map(mapResearchCard);
+    });
+  }
+
+  createResearchCard(input = {}) {
+    return this.withDb((db) => {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const paperId = numericId(input.paperId, "paperId");
+        const pageNumber = normalizePageNumber(input.pageNumber);
+        requireActiveIndexedPage(db, paperId, pageNumber);
+        const fields = validateResearchCardInput(input);
+        let annotationId = null;
+        if (input.annotationId !== undefined && input.annotationId !== null) {
+          annotationId = numericId(input.annotationId, "annotationId");
+          const annotation = db.prepare(
+            "SELECT paper_id, page_number FROM annotations WHERE id = ?"
+          ).get(annotationId);
+          if (!annotation || annotation.paper_id !== paperId || annotation.page_number !== pageNumber) {
+            throw new TypeError("annotationId must reference the same paper page");
+          }
+        }
+        const result = db.prepare(`
+          INSERT INTO research_cards (
+            annotation_id, paper_id, page_number, quote_text, translated_text, summary,
+            personal_interpretation, themes_json, evidence_type
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          annotationId,
+          paperId,
+          pageNumber,
+          fields.quoteText,
+          fields.translatedText,
+          fields.summary,
+          fields.personalInterpretation,
+          toJson(fields.themes, []),
+          fields.evidenceType
+        );
+        const card = mapResearchCard(db.prepare("SELECT * FROM research_cards WHERE id = ?").get(Number(result.lastInsertRowid)));
+        db.exec("COMMIT");
+        return card;
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    });
+  }
+
+  updateResearchCard(id, changes = {}) {
+    return this.withDb((db) => {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const cardId = numericId(id, "researchCardId");
+        const current = db.prepare("SELECT * FROM research_cards WHERE id = ?").get(cardId);
+        if (!current) {
+          db.exec("ROLLBACK");
+          return null;
+        }
+        if (expectedVersion(changes.expectedVersion) !== current.version) {
+          throw new VersionConflictError(changes.expectedVersion, current.version);
+        }
+        const paperId = changes.paperId === undefined ? current.paper_id : numericId(changes.paperId, "paperId");
+        const pageNumber = changes.pageNumber === undefined ? current.page_number : normalizePageNumber(changes.pageNumber);
+        requireActiveIndexedPage(db, paperId, pageNumber);
+        const themes = changes.themes === undefined ? parseJson(current.themes_json, []) : changes.themes;
+        const fields = validateResearchCardInput({
+          quoteText: changes.quoteText === undefined ? current.quote_text : changes.quoteText,
+          translatedText: changes.translatedText === undefined ? current.translated_text : changes.translatedText,
+          summary: changes.summary === undefined ? current.summary : changes.summary,
+          personalInterpretation: changes.personalInterpretation === undefined ? current.personal_interpretation : changes.personalInterpretation,
+          themes,
+          evidenceType: changes.evidenceType === undefined ? current.evidence_type : changes.evidenceType
+        });
+        let annotationId = current.annotation_id;
+        if (changes.annotationId !== undefined) {
+          annotationId = changes.annotationId === null ? null : numericId(changes.annotationId, "annotationId");
+          if (annotationId !== null) {
+            const annotation = db.prepare("SELECT paper_id, page_number FROM annotations WHERE id = ?").get(annotationId);
+            if (!annotation || annotation.paper_id !== paperId || annotation.page_number !== pageNumber) {
+              throw new TypeError("annotationId must reference the same paper page");
+            }
+          }
+        }
+        db.prepare(`
+          UPDATE research_cards
+          SET annotation_id = ?, paper_id = ?, page_number = ?, quote_text = ?, translated_text = ?,
+              summary = ?, personal_interpretation = ?, themes_json = ?, evidence_type = ?,
+              version = version + 1, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND version = ?
+        `).run(
+          annotationId,
+          paperId,
+          pageNumber,
+          fields.quoteText,
+          fields.translatedText,
+          fields.summary,
+          fields.personalInterpretation,
+          toJson(fields.themes, []),
+          fields.evidenceType,
+          cardId,
+          current.version
+        );
+        const updated = mapResearchCard(db.prepare("SELECT * FROM research_cards WHERE id = ?").get(cardId));
+        db.exec("COMMIT");
+        return updated;
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    });
+  }
+
+  deleteResearchCard(id) {
+    return this.withDb((db) => {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const cardId = numericId(id, "researchCardId");
+        const card = db.prepare(
+          "SELECT paper_id, page_number FROM research_cards WHERE id = ?"
+        ).get(cardId);
+        if (card) requireActiveIndexedPage(db, card.paper_id, card.page_number);
+        const deleted = Number(db.prepare("DELETE FROM research_cards WHERE id = ?").run(cardId).changes) === 1;
+        db.exec("COMMIT");
+        return deleted;
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    });
   }
 
   getPaperIndexState(paperId) {

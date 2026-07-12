@@ -277,6 +277,10 @@ function respondToPaperStateError(error, response, next) {
     response.status(400).json({ error: error.message });
     return;
   }
+  if (error instanceof RangeError) {
+    response.status(400).json({ error: error.message });
+    return;
+  }
   next(error);
 }
 
@@ -349,6 +353,41 @@ function publicPaper(paper) {
     mergedIntoId: paper.mergedIntoId,
     version: paper.version,
     status: paper.deletedAt ? "trash" : "active"
+  };
+}
+
+function publicAnnotation(annotation) {
+  return {
+    id: annotation.id,
+    paperId: annotation.paperId,
+    pageNumber: annotation.pageNumber,
+    kind: annotation.kind,
+    quoteText: annotation.quoteText,
+    translatedText: annotation.translatedText,
+    comment: annotation.comment,
+    color: annotation.color,
+    textSelector: annotation.textSelector,
+    version: annotation.version,
+    createdAt: annotation.createdAt,
+    updatedAt: annotation.updatedAt
+  };
+}
+
+function publicResearchCard(card) {
+  return {
+    id: card.id,
+    annotationId: card.annotationId,
+    paperId: card.paperId,
+    pageNumber: card.pageNumber,
+    quoteText: card.quoteText,
+    translatedText: card.translatedText,
+    summary: card.summary,
+    personalInterpretation: card.personalInterpretation,
+    themes: card.themes,
+    evidenceType: card.evidenceType,
+    version: card.version,
+    createdAt: card.createdAt,
+    updatedAt: card.updatedAt
   };
 }
 
@@ -779,6 +818,112 @@ export function createApp(options = {}) {
         return;
       }
       throw error;
+    }
+  });
+
+  app.get("/api/papers/:id/annotations", (request, response, next) => {
+    try {
+      const paperId = Number(request.params.id);
+      if (!repo.getPaper(paperId)) {
+        response.status(404).json({ error: "Paper not found" });
+        return;
+      }
+      response.json(repo.listAnnotations(paperId).map(publicAnnotation));
+    } catch (error) {
+      respondToPaperStateError(error, response, next);
+    }
+  });
+
+  app.post("/api/papers/:id/annotations", (request, response, next) => {
+    try {
+      const annotation = repo.createAnnotation({
+        ...(request.body || {}),
+        paperId: Number(request.params.id)
+      });
+      response.status(201).json(publicAnnotation(annotation));
+    } catch (error) {
+      respondToPaperStateError(error, response, next);
+    }
+  });
+
+  app.patch("/api/annotations/:id", (request, response, next) => {
+    try {
+      const annotation = repo.updateAnnotation(Number(request.params.id), request.body || {});
+      if (!annotation) {
+        response.status(404).json({ error: "Annotation not found" });
+        return;
+      }
+      response.json(publicAnnotation(annotation));
+    } catch (error) {
+      if (error instanceof VersionConflictError) {
+        response.status(409).json({ error: error.message });
+        return;
+      }
+      respondToPaperStateError(error, response, next);
+    }
+  });
+
+  app.delete("/api/annotations/:id", (request, response, next) => {
+    try {
+      requirePurgeConfirmation(request.body || {});
+      const deleted = repo.deleteAnnotation(Number(request.params.id));
+      if (!deleted) {
+        response.status(404).json({ error: "Annotation not found" });
+        return;
+      }
+      response.json({ deleted: true });
+    } catch (error) {
+      respondToPaperStateError(error, response, next);
+    }
+  });
+
+  app.get("/api/research-cards", (request, response, next) => {
+    try {
+      const paperId = request.query.paperId === undefined || request.query.paperId === ""
+        ? undefined
+        : Number(request.query.paperId);
+      response.json(repo.listResearchCards(paperId).map(publicResearchCard));
+    } catch (error) {
+      respondToPaperStateError(error, response, next);
+    }
+  });
+
+  app.post("/api/research-cards", (request, response, next) => {
+    try {
+      response.status(201).json(publicResearchCard(repo.createResearchCard(request.body || {})));
+    } catch (error) {
+      respondToPaperStateError(error, response, next);
+    }
+  });
+
+  app.patch("/api/research-cards/:id", (request, response, next) => {
+    try {
+      const card = repo.updateResearchCard(Number(request.params.id), request.body || {});
+      if (!card) {
+        response.status(404).json({ error: "Research card not found" });
+        return;
+      }
+      response.json(publicResearchCard(card));
+    } catch (error) {
+      if (error instanceof VersionConflictError) {
+        response.status(409).json({ error: error.message });
+        return;
+      }
+      respondToPaperStateError(error, response, next);
+    }
+  });
+
+  app.delete("/api/research-cards/:id", (request, response, next) => {
+    try {
+      requirePurgeConfirmation(request.body || {});
+      const deleted = repo.deleteResearchCard(Number(request.params.id));
+      if (!deleted) {
+        response.status(404).json({ error: "Research card not found" });
+        return;
+      }
+      response.json({ deleted: true });
+    } catch (error) {
+      respondToPaperStateError(error, response, next);
     }
   });
 

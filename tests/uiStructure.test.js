@@ -133,6 +133,34 @@ test("paper detail exposes metadata save and notes autosave wiring", async () =>
   assert.match(script, /NOTE_AUTOSAVE_DELAY_MS/);
 });
 
+test("frontend reader exposes page-linked annotation and research-card controls", async () => {
+  const html = await readFile("public/index.html", "utf8");
+  const script = await readFile("public/app.js", "utf8");
+  const css = await readFile("public/styles.css", "utf8");
+
+  for (const id of [
+    "annotationSelectionToolbar",
+    "annotationSidebar",
+    "researchCardList",
+    "saveHighlightButton",
+    "saveNoteButton",
+    "saveQuoteButton"
+  ]) assert.match(html, new RegExp(`id="${id}"`));
+  assert.match(html, /高亮/);
+  assert.match(html, /批注/);
+  assert.match(html, /翻译/);
+  assert.match(html, /保存摘录/);
+  assert.ok(script.includes("/api/papers/${state.reader.paperId}/annotations"));
+  assert.match(script, /api\/research-cards/);
+  assert.match(script, /normalizeTextSelector|buildTextSelector/);
+  assert.match(script, /TreeWalker|textContent/);
+  assert.match(script, /positionVerified/);
+  assert.match(script, /textContent/);
+  assert.match(css, /#annotationSelectionToolbar/);
+  assert.match(css, /#annotationSidebar/);
+  assert.match(css, /@media \(max-width: 900px\)/);
+});
+
 test("frontend exposes safe search scopes and page-targeted hit navigation", async () => {
   const html = await readFile("public/index.html", "utf8");
   const script = await readFile("public/app.js", "utf8");

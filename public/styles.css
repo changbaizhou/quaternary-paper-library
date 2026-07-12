@@ -880,6 +880,7 @@ textarea {
 .reader-view {
   display: grid;
   grid-template-rows: 50px auto auto minmax(0, 1fr);
+  position: relative;
 }
 
 .reader-heading {
@@ -998,6 +999,164 @@ textarea {
   white-space: pre-wrap;
 }
 
+.reader-body {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  overflow: hidden;
+}
+
+.reader-body .pdf-viewer {
+  min-width: 0;
+}
+
+#annotationSelectionToolbar,
+.annotation-selection-toolbar {
+  position: fixed;
+  z-index: 20;
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-raised);
+  box-shadow: 0 6px 18px rgba(17, 39, 44, 0.2);
+}
+
+.annotation-selection-toolbar[hidden] {
+  display: none;
+}
+
+.annotation-selection-toolbar button {
+  min-height: 30px;
+  padding: 0 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+#annotationSidebar,
+.annotation-sidebar {
+  min-width: 0;
+  overflow: auto;
+  padding: 12px;
+  border-left: 1px solid var(--line);
+  background: var(--surface-soft);
+}
+
+.annotation-sidebar-heading,
+.research-card-heading,
+.annotation-card-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.annotation-sidebar h3,
+.research-card-heading h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.annotation-sidebar-heading span,
+.research-card-heading span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.annotation-filters {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin: 10px 0;
+}
+
+.annotation-filters select,
+.research-card-editor input,
+.research-card-editor select,
+.research-card-editor textarea {
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 7px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface-raised);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+}
+
+.annotation-list,
+.research-card-list {
+  display: grid;
+  gap: 8px;
+}
+
+.annotation-item,
+.research-card-item {
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--annotation-color, #d6ab3c);
+  border-radius: 5px;
+  background: var(--surface-raised);
+}
+
+.annotation-item button,
+.research-card-item button {
+  min-height: 26px;
+  padding: 2px 7px;
+  font-size: 11px;
+}
+
+.annotation-quote,
+.research-card-quote {
+  margin: 6px 0;
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.annotation-meta,
+.research-card-meta,
+.annotation-unresolved {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.annotation-actions,
+.research-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.research-card-heading {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.research-card-editor {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.research-card-editor[hidden] {
+  display: none;
+}
+
+.annotation-overlay {
+  position: absolute;
+  z-index: 2;
+  pointer-events: none;
+  border-radius: 2px;
+  background: rgba(245, 205, 77, 0.36);
+}
+
 .pdf-viewer {
   min-height: 0;
   overflow: auto;
@@ -1081,6 +1240,29 @@ textarea {
 
   .two-column {
     grid-template-columns: 1fr;
+  }
+
+  .reader-body {
+    grid-template-columns: 1fr;
+  }
+
+  .annotation-sidebar {
+    max-height: 42vh;
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+
+  .annotation-selection-toolbar {
+    position: fixed;
+    right: 8px;
+    bottom: 10px;
+    left: 8px;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+
+  .annotation-selection-toolbar button {
+    flex: 1 1 100px;
   }
 
   .header-actions {

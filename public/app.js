@@ -64,7 +64,12 @@ const state = {
     autoTranslateTimer: null,
     lastTranslatedSelection: "",
     pendingTranslationSelection: "",
-    translationRequestId: 0
+    translationRequestId: 0,
+    annotations: [],
+    researchCards: [],
+    selection: null,
+    annotationResolutions: new Map(),
+    editingCardId: null
   }
 };
 
@@ -130,7 +135,26 @@ const readerElements = {
   translateSelectionButton: document.querySelector("#translateSelectionButton"),
   translationPanel: document.querySelector("#translationPanel"),
   translationStatusText: document.querySelector("#translationStatusText"),
-  translationResultText: document.querySelector("#translationResultText")
+  translationResultText: document.querySelector("#translationResultText"),
+  selectionToolbar: document.querySelector("#annotationSelectionToolbar"),
+  saveHighlightButton: document.querySelector("#saveHighlightButton"),
+  saveNoteButton: document.querySelector("#saveNoteButton"),
+  translateAnnotationButton: document.querySelector("#translateAnnotationButton"),
+  saveQuoteButton: document.querySelector("#saveQuoteButton"),
+  annotationSidebar: document.querySelector("#annotationSidebar"),
+  annotationCount: document.querySelector("#annotationCount"),
+  annotationList: document.querySelector("#annotationList"),
+  annotationKindFilter: document.querySelector("#annotationKindFilter"),
+  annotationColorFilter: document.querySelector("#annotationColorFilter"),
+  researchCardCount: document.querySelector("#researchCardCount"),
+  researchCardList: document.querySelector("#researchCardList"),
+  researchCardEditor: document.querySelector("#researchCardEditor"),
+  cardSummaryField: document.querySelector("#cardSummaryField"),
+  cardInterpretationField: document.querySelector("#cardInterpretationField"),
+  cardThemesField: document.querySelector("#cardThemesField"),
+  cardEvidenceTypeField: document.querySelector("#cardEvidenceTypeField"),
+  saveResearchCardButton: document.querySelector("#saveResearchCardButton"),
+  cancelResearchCardButton: document.querySelector("#cancelResearchCardButton")
 };
 
 const workspaceElements = {
@@ -193,6 +217,383 @@ function getSelectedReaderText() {
   if (!selection?.rangeCount) return "";
   if (!nodeIsInsideReader(selection.anchorNode) || !nodeIsInsideReader(selection.focusNode)) return "";
   return selection.toString().replace(/\s+/g, " ").trim();
+}
+
+function selectedPageWrapper(selection = window.getSelection()) {
+  if (!selection?.rangeCount) return null;
+  const range = selection.getRangeAt(0);
+  const node = range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
+    ? range.commonAncestorContainer
+    : range.commonAncestorContainer.parentElement;
+  return node?.closest?.(".pdf-page-wrapper") || null;
+}
+
+function buildTextSelectorFromSelection() {
+  const selection = window.getSelection();
+  if (!selection?.rangeCount || !getSelectedReaderText()) return null;
+  if (!nodeIsInsideReader(selection.anchorNode) || !nodeIsInsideReader(selection.focusNode)) return null;
+  const range = selection.getRangeAt(0);
+  const pageWrapper = selectedPageWrapper(selection);
+  const quote = range.toString();
+  const selector = {
+    quote,
+    prefix: "",
+    suffix: "",
+    positionVerified: false
+  };
+  if (!pageWrapper) return { pageNumber: null, quote, selector };
+
+  const textLayer = pageWrapper.querySelector(".text-layer");
+  if (!textLayer) return { pageNumber: Number(pageWrapper.dataset.pageNumber), quote, selector };
+  const pageText = textLayer.textContent || "";
+  try {
+    const before = range.cloneRange();
+    before.selectNodeContents(textLayer);
+    before.setEnd(range.startContainer, range.startOffset);
+    const after = range.cloneRange();
+    after.selectNodeContents(textLayer);
+    after.setEnd(range.endContainer, range.endOffset);
+    const start = before.toString().length;
+    const end = after.toString().length;
+    selector.start = start;
+    selector.end = end;
+    selector.prefix = pageText.slice(Math.max(0, start - 32), start);
+    selector.suffix = pageText.slice(end, end + 32);
+    selector.positionVerified = pageText.slice(start, end) === quote;
+  } catch {
+    selector.positionVerified = false;
+  }
+  return { pageNumber: Number(pageWrapper.dataset.pageNumber), quote, selector };
+}
+
+function positionSelectionToolbar() {
+  const selection = window.getSelection();
+  if (!selection?.rangeCount || !state.reader.selection) return;
+  const rect = selection.getRangeAt(0).getBoundingClientRect();
+  if (!rect.width && !rect.height) return;
+  readerElements.selectionToolbar.style.left = `${Math.max(8, rect.left)}px`;
+  readerElements.selectionToolbar.style.top = `${Math.max(8, rect.top - 44)}px`;
+}
+
+function showSelectionToolbar() {
+  const snapshot = buildTextSelectorFromSelection();
+  if (!snapshot || !snapshot.pageNumber) {
+    state.reader.selection = null;
+    readerElements.selectionToolbar.hidden = true;
+    return;
+  }
+  state.reader.selection = snapshot;
+  readerElements.selectionToolbar.hidden = false;
+  positionSelectionToolbar();
+}
+
+function hideSelectionToolbar() {
+  state.reader.selection = null;
+  readerElements.selectionToolbar.hidden = true;
+}
+
+function makeActionButton(label, action, dataset = {}) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "secondary";
+  button.textContent = label;
+  button.dataset.action = action;
+  for (const [key, value] of Object.entries(dataset)) button.dataset[key] = String(value);
+  return button;
+}
+
+function annotationColorValue(color) {
+  return {
+    yellow: "#d6ab3c",
+    green: "#63a975",
+    blue: "#5c91c5",
+    pink: "#d6819a",
+    purple: "#9770b5"
+  }[color] || "#d6ab3c";
+}
+
+function filteredAnnotations() {
+  const kind = readerElements.annotationKindFilter.value;
+  const color = readerElements.annotationColorFilter.value;
+  return state.reader.annotations.filter((annotation) =>
+    (!kind || annotation.kind === kind) && (!color || annotation.color === color)
+  );
+}
+
+function renderAnnotations() {
+  const annotations = filteredAnnotations();
+  readerElements.annotationCount.textContent = String(state.reader.annotations.length);
+  readerElements.annotationList.replaceChildren();
+  if (!annotations.length) {
+    const empty = document.createElement("div");
+    empty.className = "annotation-meta";
+    empty.textContent = "本篇暂无标注";
+    readerElements.annotationList.append(empty);
+  }
+  for (const annotation of annotations) {
+    const item = document.createElement("article");
+    item.className = "annotation-item";
+    item.style.setProperty("--annotation-color", annotationColorValue(annotation.color));
+    const heading = document.createElement("div");
+    heading.className = "annotation-card-heading";
+    const title = document.createElement("strong");
+    title.textContent = annotation.kind === "highlight" ? "高亮" : annotation.kind === "note" ? "批注" : "摘录";
+    const page = document.createElement("span");
+    page.className = "annotation-meta";
+    page.textContent = `第 ${annotation.pageNumber} 页`;
+    heading.append(title, page);
+    const quote = document.createElement("div");
+    quote.className = "annotation-quote";
+    quote.textContent = annotation.quoteText;
+    const meta = document.createElement("div");
+    meta.className = "annotation-meta";
+    meta.textContent = state.reader.annotationResolutions.get(annotation.id) === false
+      ? "待重新定位"
+      : annotation.comment || "";
+    const actions = document.createElement("div");
+    actions.className = "annotation-actions";
+    actions.append(
+      makeActionButton("跳页", "jump-annotation", { annotationId: annotation.id }),
+      makeActionButton("编辑", "edit-annotation", { annotationId: annotation.id }),
+      makeActionButton("删除", "delete-annotation", { annotationId: annotation.id })
+    );
+    item.append(heading, quote, meta, actions);
+    readerElements.annotationList.append(item);
+  }
+}
+
+function renderResearchCards() {
+  readerElements.researchCardCount.textContent = String(state.reader.researchCards.length);
+  readerElements.researchCardList.replaceChildren();
+  if (!state.reader.researchCards.length) {
+    const empty = document.createElement("div");
+    empty.className = "research-card-meta";
+    empty.textContent = "暂无研究卡片";
+    readerElements.researchCardList.append(empty);
+  }
+  for (const card of state.reader.researchCards) {
+    const item = document.createElement("article");
+    item.className = "research-card-item";
+    const heading = document.createElement("div");
+    heading.className = "annotation-card-heading";
+    const title = document.createElement("strong");
+    title.textContent = card.evidenceType;
+    const page = document.createElement("span");
+    page.className = "research-card-meta";
+    page.textContent = `第 ${card.pageNumber} 页`;
+    heading.append(title, page);
+    const quote = document.createElement("div");
+    quote.className = "research-card-quote";
+    quote.textContent = card.quoteText;
+    const summary = document.createElement("div");
+    summary.className = "research-card-meta";
+    summary.textContent = card.summary || "未填写摘要";
+    const actions = document.createElement("div");
+    actions.className = "research-card-actions";
+    actions.append(
+      makeActionButton("跳页", "jump-card", { cardId: card.id }),
+      makeActionButton("编辑", "edit-card", { cardId: card.id }),
+      makeActionButton("删除", "delete-card", { cardId: card.id })
+    );
+    item.append(heading, quote, summary, actions);
+    readerElements.researchCardList.append(item);
+  }
+}
+
+async function loadReaderRecords() {
+  if (!state.reader.paperId) return;
+  const paperId = state.reader.paperId;
+  const [annotations, researchCards] = await Promise.all([
+    api(`/api/papers/${paperId}/annotations`),
+    api(`/api/research-cards?paperId=${paperId}`)
+  ]);
+  if (state.reader.paperId !== paperId) return;
+  state.reader.annotations = annotations;
+  state.reader.researchCards = researchCards;
+  state.reader.annotationResolutions = new Map();
+  renderAnnotations();
+  renderResearchCards();
+}
+
+function findTextRange(textLayer, quote, selector = {}) {
+  const text = textLayer.textContent || "";
+  let start = selector.positionVerified && Number.isInteger(selector.start)
+    && text.slice(selector.start, selector.end) === quote
+    ? selector.start
+    : text.indexOf(quote);
+  if (start < 0) return null;
+  const end = start + quote.length;
+  const walker = document.createTreeWalker(textLayer, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  let node;
+  let offset = 0;
+  while ((node = walker.nextNode())) {
+    nodes.push({ node, start: offset, end: offset + node.nodeValue.length });
+    offset += node.nodeValue.length;
+  }
+  const boundary = (position) => {
+    const target = nodes.find((entry) => position >= entry.start && position <= entry.end);
+    if (!target) return null;
+    return { node: target.node, offset: position - target.start };
+  };
+  const rangeStart = boundary(start);
+  const rangeEnd = boundary(end);
+  if (!rangeStart || !rangeEnd) return null;
+  const range = document.createRange();
+  range.setStart(rangeStart.node, rangeStart.offset);
+  range.setEnd(rangeEnd.node, rangeEnd.offset);
+  return range;
+}
+
+function restoreAnnotationOverlays(pageNumber, shell) {
+  const pageAnnotations = state.reader.annotations.filter((annotation) =>
+    annotation.pageNumber === pageNumber && annotation.kind !== "note"
+  );
+  const textLayer = shell.querySelector(".text-layer");
+  if (!textLayer) return;
+  for (const annotation of pageAnnotations) {
+    const range = findTextRange(textLayer, annotation.quoteText, annotation.textSelector || {});
+    if (!range) {
+      state.reader.annotationResolutions.set(annotation.id, false);
+      continue;
+    }
+    state.reader.annotationResolutions.set(annotation.id, true);
+    for (const rect of range.getClientRects()) {
+      const pageRect = shell.getBoundingClientRect();
+      const overlay = document.createElement("span");
+      overlay.className = "annotation-overlay";
+      overlay.style.left = `${rect.left - pageRect.left}px`;
+      overlay.style.top = `${rect.top - pageRect.top}px`;
+      overlay.style.width = `${rect.width}px`;
+      overlay.style.height = `${rect.height}px`;
+      overlay.style.background = `${annotationColorValue(annotation.color)}66`;
+      shell.append(overlay);
+    }
+  }
+  renderAnnotations();
+}
+
+function currentSelectionTranslation() {
+  const selectedText = getSelectedReaderText();
+  return selectedText && selectedText === state.reader.lastTranslatedSelection
+    ? readerElements.translationResultText.textContent.trim()
+    : "";
+}
+
+async function saveSelectedAnnotation(kind) {
+  const selection = state.reader.selection || buildTextSelectorFromSelection();
+  if (!selection || !selection.pageNumber || !state.reader.paperId) return;
+  const comment = kind === "note" ? window.prompt("请输入批注", "") : "";
+  if (kind === "note" && comment === null) return;
+  try {
+    const annotation = await api(`/api/papers/${state.reader.paperId}/annotations`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        pageNumber: selection.pageNumber,
+        kind,
+        quoteText: selection.quote,
+        translatedText: currentSelectionTranslation(),
+        comment: comment || "",
+        color: "yellow",
+        textSelector: selection.selector
+      })
+    });
+    if (kind === "quote") {
+      await api("/api/research-cards", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          annotationId: annotation.id,
+          paperId: state.reader.paperId,
+          pageNumber: annotation.pageNumber,
+          quoteText: annotation.quoteText,
+          translatedText: annotation.translatedText,
+          summary: "",
+          personalInterpretation: "",
+          themes: [],
+          evidenceType: "uncertain"
+        })
+      });
+    }
+    await loadReaderRecords();
+    if (kind === "quote") {
+      const card = state.reader.researchCards.find((entry) => entry.annotationId === annotation.id);
+      if (card) beginResearchCardEdit(card);
+    }
+    hideSelectionToolbar();
+    window.getSelection()?.removeAllRanges();
+    setStatus(kind === "quote" ? "摘录和研究卡片已保存" : "标注已保存");
+  } catch (error) {
+    setStatus(error.message);
+  }
+}
+
+function beginResearchCardEdit(card) {
+  state.reader.editingCardId = card.id;
+  readerElements.cardSummaryField.value = card.summary || "";
+  readerElements.cardInterpretationField.value = card.personalInterpretation || "";
+  readerElements.cardThemesField.value = (card.themes || []).join(", ");
+  readerElements.cardEvidenceTypeField.value = card.evidenceType || "uncertain";
+  readerElements.researchCardEditor.hidden = false;
+}
+
+function cancelResearchCardEdit() {
+  state.reader.editingCardId = null;
+  readerElements.researchCardEditor.hidden = true;
+}
+
+async function saveResearchCardEdit(event) {
+  event.preventDefault();
+  const card = state.reader.researchCards.find((entry) => entry.id === state.reader.editingCardId);
+  if (!card) return;
+  try {
+    await api(`/api/research-cards/${card.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        expectedVersion: card.version,
+        summary: readerElements.cardSummaryField.value,
+        personalInterpretation: readerElements.cardInterpretationField.value,
+        themes: readerElements.cardThemesField.value.split(",").map((theme) => theme.trim()).filter(Boolean),
+        evidenceType: readerElements.cardEvidenceTypeField.value
+      })
+    });
+    cancelResearchCardEdit();
+    await loadReaderRecords();
+    setStatus("研究卡片已保存");
+  } catch (error) {
+    setStatus(error.message);
+  }
+}
+
+async function editAnnotation(annotation) {
+  const comment = window.prompt("编辑批注", annotation.comment || "");
+  if (comment === null) return;
+  try {
+    await api(`/api/annotations/${annotation.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expectedVersion: annotation.version, comment })
+    });
+    await loadReaderRecords();
+  } catch (error) {
+    setStatus(error.message);
+  }
+}
+
+async function deleteAnnotation(annotation) {
+  if (!await confirmAction("删除标注", "标注会被删除，关联研究卡片将保留。", "删除")) return;
+  try {
+    await api(`/api/annotations/${annotation.id}`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ confirm: true })
+    });
+    await loadReaderRecords();
+  } catch (error) {
+    setStatus(error.message);
+  }
 }
 
 async function api(path, options = {}) {
@@ -921,6 +1322,13 @@ async function closeReaderDocument() {
   clearReadingProgressQueue();
   state.reader.renderToken += 1;
   resetTranslationState();
+  hideSelectionToolbar();
+  cancelResearchCardEdit();
+  state.reader.annotations = [];
+  state.reader.researchCards = [];
+  state.reader.annotationResolutions = new Map();
+  renderAnnotations();
+  renderResearchCards();
   resetRenderedPages();
   if (state.reader.loadingTask?.destroy) {
     await state.reader.loadingTask.destroy().catch(() => {});
@@ -1034,6 +1442,7 @@ async function renderPageShell(pageNumber, token = state.reader.renderToken) {
 
     const textContent = await page.getTextContent().catch(() => ({ items: [] }));
     renderTextLayer(shell, textContent, viewport);
+    restoreAnnotationOverlays(pageNumber, shell);
     state.reader.renderedPages.add(pageNumber);
   } catch (error) {
     if (state.reader.renderToken !== token) return;
@@ -1167,6 +1576,8 @@ async function openReader(paper, { targetPage = null } = {}) {
     .filter(Boolean)
     .join(" · ");
   readerElements.openButton.href = sourceUrl;
+  renderAnnotations();
+  renderResearchCards();
   readerElements.viewer.innerHTML = `<div class="empty-state">正在打开原文件</div>`;
   updateTranslationPanel("未选择文本", "", { hidden: true });
   updateReaderControls();
@@ -1175,6 +1586,7 @@ async function openReader(paper, { targetPage = null } = {}) {
     state.reader.loadingTask = pdfjsLib.getDocument({ url: sourceUrl });
     state.reader.document = await state.reader.loadingTask.promise;
     state.reader.pageCount = state.reader.document.numPages;
+    await loadReaderRecords();
     await renderContinuousPages({ targetPage: resumePage });
     if (requestedPage) requestAnimationFrame(() => scrollToSearchPage(requestedPage));
     setStatus(
@@ -1700,6 +2112,51 @@ document.querySelector("#goBookmarkButton").addEventListener("click", () => {
 
 document.querySelector("#translateSelectionButton").addEventListener("click", translateSelectedText);
 document.addEventListener("selectionchange", scheduleSelectedTextTranslation);
+document.addEventListener("selectionchange", showSelectionToolbar);
+
+readerElements.saveHighlightButton.addEventListener("click", () => void saveSelectedAnnotation("highlight"));
+readerElements.saveNoteButton.addEventListener("click", () => void saveSelectedAnnotation("note"));
+readerElements.translateAnnotationButton.addEventListener("click", () => {
+  const selectedText = state.reader.selection?.quote || getSelectedReaderText();
+  void translateSelectedText({ selectedText });
+});
+readerElements.saveQuoteButton.addEventListener("click", () => void saveSelectedAnnotation("quote"));
+readerElements.annotationKindFilter.addEventListener("change", renderAnnotations);
+readerElements.annotationColorFilter.addEventListener("change", renderAnnotations);
+readerElements.researchCardEditor.addEventListener("submit", saveResearchCardEdit);
+readerElements.cancelResearchCardButton.addEventListener("click", cancelResearchCardEdit);
+
+readerElements.annotationList.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-action]");
+  if (!button) return;
+  const annotation = state.reader.annotations.find((entry) => entry.id === Number(button.dataset.annotationId));
+  if (!annotation) return;
+  if (button.dataset.action === "jump-annotation") scrollToPage(annotation.pageNumber);
+  if (button.dataset.action === "edit-annotation") await editAnnotation(annotation);
+  if (button.dataset.action === "delete-annotation") await deleteAnnotation(annotation);
+});
+
+readerElements.researchCardList.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-action]");
+  if (!button) return;
+  const card = state.reader.researchCards.find((entry) => entry.id === Number(button.dataset.cardId));
+  if (!card) return;
+  if (button.dataset.action === "jump-card") scrollToPage(card.pageNumber);
+  if (button.dataset.action === "edit-card") beginResearchCardEdit(card);
+  if (button.dataset.action === "delete-card") {
+    if (!await confirmAction("删除研究卡片", "研究卡片会被删除，原始标注保留。", "删除")) return;
+    try {
+      await api(`/api/research-cards/${card.id}`, {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ confirm: true })
+      });
+      await loadReaderRecords();
+    } catch (error) {
+      setStatus(error.message);
+    }
+  }
+});
 
 readerElements.viewer.addEventListener("scroll", updateCurrentPageFromScroll);
 

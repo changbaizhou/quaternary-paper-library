@@ -115,8 +115,60 @@
             </div>
             <div id="translationResultText" class="translation-result-text">在原文中选中文字后自动翻译。</div>
           </div>
-          <div id="pdfViewer" class="pdf-viewer">
-            <div class="empty-state">选择论文后阅读原文件</div>
+          <div id="annotationSelectionToolbar" class="annotation-selection-toolbar" hidden role="toolbar" aria-label="选中文本操作">
+            <button id="saveHighlightButton" type="button" class="secondary">高亮</button>
+            <button id="saveNoteButton" type="button" class="secondary">批注</button>
+            <button id="translateAnnotationButton" type="button" class="secondary">翻译</button>
+            <button id="saveQuoteButton" type="button" class="secondary">保存摘录</button>
+          </div>
+          <div class="reader-body">
+            <div id="pdfViewer" class="pdf-viewer">
+              <div class="empty-state">选择论文后阅读原文件</div>
+            </div>
+            <aside id="annotationSidebar" class="annotation-sidebar" aria-label="本篇标注">
+              <div class="annotation-sidebar-heading">
+                <h3>本篇标注</h3>
+                <span id="annotationCount">0</span>
+              </div>
+              <div class="annotation-filters">
+                <select id="annotationKindFilter" aria-label="标注类型筛选">
+                  <option value="">全部类型</option>
+                  <option value="highlight">高亮</option>
+                  <option value="note">批注</option>
+                  <option value="quote">摘录</option>
+                </select>
+                <select id="annotationColorFilter" aria-label="标注颜色筛选">
+                  <option value="">全部颜色</option>
+                  <option value="yellow">黄色</option>
+                  <option value="green">绿色</option>
+                  <option value="blue">蓝色</option>
+                  <option value="pink">粉色</option>
+                  <option value="purple">紫色</option>
+                </select>
+              </div>
+              <div id="annotationList" class="annotation-list"></div>
+              <div class="research-card-heading">
+                <h3>研究卡片</h3>
+                <span id="researchCardCount">0</span>
+              </div>
+              <div id="researchCardList" class="research-card-list"></div>
+              <form id="researchCardEditor" class="research-card-editor" hidden>
+                <textarea id="cardSummaryField" rows="2" placeholder="摘要"></textarea>
+                <textarea id="cardInterpretationField" rows="2" placeholder="个人理解"></textarea>
+                <input id="cardThemesField" type="text" placeholder="主题，用逗号分隔" />
+                <select id="cardEvidenceTypeField">
+                  <option value="uncertain">不确定</option>
+                  <option value="supports">支持</option>
+                  <option value="opposes">反对</option>
+                  <option value="method">方法</option>
+                  <option value="background">背景</option>
+                </select>
+                <div class="button-row">
+                  <button id="saveResearchCardButton" type="submit">保存卡片</button>
+                  <button id="cancelResearchCardButton" type="button" class="secondary">取消</button>
+                </div>
+              </form>
+            </aside>
           </div>
         </div>
         <div id="trashView" class="panel-view workspace-record-view" hidden>

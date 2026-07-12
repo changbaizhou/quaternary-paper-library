@@ -1525,6 +1525,100 @@ test("API translation maps provider failures to a clear error", async () => {
   );
 });
 
+test("annotation and research-card API enforces page, confirmation, version, and public shape", async () => {
+  await withServer(async (baseUrl, { dbPath }) => {
+    const repo = new PaperRepository(dbPath);
+    const paperId = repo.withDb((db) => Number(db.prepare(
+      "INSERT INTO papers (title, search_text) VALUES (?, ?)"
+    ).run("Annotation API paper", "annotation api paper").lastInsertRowid));
+    repo.withDb((db) => {
+      db.prepare(`
+        INSERT INTO paper_pages (paper_id, page_number, text, text_source, character_count)
+        VALUES (?, 1, ?, 'pdf', ?)
+      `).run(paperId, "prefix quote suffix", "prefix quote suffix".length);
+    });
+
+    const missingPage = await fetch(`${baseUrl}/api/papers/${paperId}/annotations`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pageNumber: 2, kind: "highlight", quoteText: "quote" })
+    });
+    assert.equal(missingPage.status, 400);
+
+    const created = await fetch(`${baseUrl}/api/papers/${paperId}/annotations`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        pageNumber: 1,
+        kind: "highlight",
+        quoteText: "quote",
+        color: "yellow",
+        textSelector: {
+          quote: "quote",
+          prefix: "prefix ",
+          suffix: " suffix",
+          start: 7,
+          end: 12,
+          positionVerified: true,
+          pageText: "prefix quote suffix"
+        }
+      })
+    });
+    assert.equal(created.status, 201);
+    const annotation = await created.json();
+    assert.equal(annotation.paperId, paperId);
+    assert.equal(annotation.pageNumber, 1);
+    assert.equal(annotation.version, 1);
+    assert.equal("storedPath" in annotation, false);
+    assert.equal(JSON.stringify(annotation).includes(dbPath), false);
+
+    const card = await fetch(`${baseUrl}/api/research-cards`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        annotationId: annotation.id,
+        paperId,
+        pageNumber: 1,
+        quoteText: "quote",
+        summary: "summary",
+        personalInterpretation: "interpretation",
+        themes: ["theme"],
+        evidenceType: "supports"
+      })
+    });
+    assert.equal(card.status, 201);
+    const researchCard = await card.json();
+    assert.equal(researchCard.annotationId, annotation.id);
+
+    const stale = await fetch(`${baseUrl}/api/annotations/${annotation.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expectedVersion: 99, comment: "stale" })
+    });
+    assert.equal(stale.status, 409);
+
+    const missingConfirmation = await fetch(`${baseUrl}/api/annotations/${annotation.id}`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({})
+    });
+    assert.equal(missingConfirmation.status, 400);
+
+    const deleted = await fetch(`${baseUrl}/api/annotations/${annotation.id}`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ confirm: true })
+    });
+    assert.equal(deleted.status, 200);
+
+    const cards = await fetch(`${baseUrl}/api/research-cards?paperId=${paperId}`);
+    assert.equal(cards.status, 200);
+    const retainedCards = await cards.json();
+    assert.equal(retainedCards[0].annotationId, null);
+    assert.equal(retainedCards[0].quoteText, "quote");
+  });
+});
+
 test("search API validates parameters, applies filters, and never leaks FTS errors", async () => {
   await withServer(async (baseUrl, { dbPath }) => {
     const repo = new PaperRepository(dbPath);
