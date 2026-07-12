@@ -835,6 +835,48 @@ textarea {
   font-size: 13px;
 }
 
+.search-scope-label {
+  display: grid;
+  gap: 5px;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.search-result-status {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.search-result-status.is-error {
+  color: #a03835;
+}
+
+.search-result-item {
+  cursor: pointer;
+}
+
+.search-hit-meta {
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.search-snippet {
+  margin-top: 7px;
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.search-snippet mark {
+  padding: 0 2px;
+  background: #f4d9a2;
+  color: inherit;
+}
+
 .reader-view {
   display: grid;
   grid-template-rows: 50px auto auto minmax(0, 1fr);
@@ -968,6 +1010,11 @@ textarea {
   margin: 0 auto;
   background: #fff;
   box-shadow: 0 8px 30px rgba(17, 39, 44, 0.18);
+}
+
+.pdf-page-wrapper.search-hit {
+  outline: 3px solid #d68a36;
+  outline-offset: 4px;
 }
 
 .pdf-page + .pdf-page {

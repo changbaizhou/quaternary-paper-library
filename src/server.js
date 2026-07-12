@@ -41,7 +41,8 @@ import {
   PaperRepository,
   PaperStateError,
   DraftNotFoundError,
-  VersionConflictError
+  VersionConflictError,
+  SearchQueryError
 } from "./repository.js";
 import { classifyText } from "./taxonomy.js";
 import { translateText, TranslationError } from "./translation.js";
@@ -241,6 +242,16 @@ function parseFilters(query) {
     if (query[field]) filters[field] = normalizeList(query[field]);
   }
   return filters;
+}
+
+function parseSearchInteger(value, fallback, maximum, label) {
+  if (value === undefined || value === "") return fallback;
+  if (!/^\d+$/.test(String(value))) throw new SearchQueryError();
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > maximum) {
+    throw new SearchQueryError();
+  }
+  return parsed;
 }
 
 function requirePurgeConfirmation(body) {
@@ -751,6 +762,24 @@ export function createApp(options = {}) {
         query: request.query.query || "",
         filters: parseFilters(request.query)
       }).map(publicPaper));
+  });
+
+  app.get("/api/search", (request, response) => {
+    try {
+      response.json(repo.searchLibrary({
+        query: request.query.q || "",
+        scope: request.query.scope === undefined ? "all" : request.query.scope,
+        filters: parseFilters(request.query),
+        page: parseSearchInteger(request.query.page, 1, Number.MAX_SAFE_INTEGER, "page"),
+        pageSize: parseSearchInteger(request.query.pageSize, 20, 100, "pageSize")
+      }));
+    } catch (error) {
+      if (error instanceof SearchQueryError) {
+        response.status(400).json({ error: error.message });
+        return;
+      }
+      throw error;
+    }
   });
 
   app.get("/api/duplicates", (_request, response) => {

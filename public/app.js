@@ -25,6 +25,10 @@ const noteFieldNames = [
 const state = {
   drafts: [],
   papers: [],
+  searchResults: null,
+  searchTotal: 0,
+  searchLoading: false,
+  searchError: "",
   trash: [],
   backups: [],
   duplicateRows: [],
@@ -348,6 +352,86 @@ function chip(label, className = "") {
   return `<span class="chip ${className}">${label}</span>`;
 }
 
+function appendSafeHighlightedText(container, value, terms = []) {
+  const text = String(value || "");
+  const normalized = text.toLocaleLowerCase();
+  const needles = [...new Set((terms || []).map((term) => String(term || "").trim()).filter(Boolean))]
+    .sort((left, right) => right.length - left.length);
+  let cursor = 0;
+  while (cursor < text.length) {
+    let match = null;
+    for (const needle of needles) {
+      const index = normalized.indexOf(needle.toLocaleLowerCase(), cursor);
+      if (index < 0 || (match && index >= match.index)) continue;
+      match = { index, needle };
+    }
+    if (!match) {
+      container.append(document.createTextNode(text.slice(cursor)));
+      break;
+    }
+    if (match.index > cursor) container.append(document.createTextNode(text.slice(cursor, match.index)));
+    const mark = document.createElement("mark");
+    mark.textContent = text.slice(match.index, match.index + match.needle.length);
+    container.append(mark);
+    cursor = match.index + match.needle.length;
+  }
+}
+
+function renderSearchResults() {
+  const container = document.querySelector("#paperList");
+  const status = document.querySelector("#searchResultStatus");
+  document.querySelector("#paperCount").textContent = String(state.searchTotal);
+  status.hidden = false;
+  status.className = "search-result-status";
+  if (state.searchLoading) {
+    status.textContent = "正在检索…";
+    container.replaceChildren();
+    return;
+  }
+  if (state.searchError) {
+    status.classList.add("is-error");
+    status.textContent = `检索失败：${state.searchError}`;
+    container.replaceChildren();
+    return;
+  }
+  if (!state.searchResults?.length) {
+    status.textContent = "没有找到匹配结果";
+    container.replaceChildren();
+    return;
+  }
+  status.textContent = `找到 ${state.searchTotal} 条命中`;
+  container.replaceChildren(...state.searchResults.map((hit) => {
+    const item = document.createElement("article");
+    item.className = "paper-item search-result-item";
+    item.dataset.paperId = String(hit.paperId);
+    item.dataset.searchHit = "true";
+    item.dataset.matchScope = hit.matchScope;
+    if (hit.pageNumber) item.dataset.targetPage = String(hit.pageNumber);
+
+    const main = document.createElement("div");
+    main.className = "paper-card-main";
+    const title = document.createElement("h3");
+    title.className = "paper-title";
+    title.textContent = hit.title || "未命名论文";
+    const meta = document.createElement("div");
+    meta.className = "paper-meta";
+    meta.textContent = [(hit.authors || []).join(", "), hit.year].filter(Boolean).join(" · ");
+    main.append(title, meta);
+
+    const scope = document.createElement("div");
+    scope.className = "search-hit-meta";
+    scope.textContent = hit.matchScope === "fulltext"
+      ? `全文命中 · 第 ${hit.pageNumber} 页`
+      : hit.matchScope === "metadata" ? "元数据命中" : "笔记命中";
+
+    const snippet = document.createElement("div");
+    snippet.className = "search-snippet";
+    appendSafeHighlightedText(snippet, hit.snippet, hit.highlightTerms);
+    item.append(main, scope, snippet);
+    return item;
+  }));
+}
+
 function renderDrafts() {
   const container = document.querySelector("#draftList");
   if (state.drafts.length === 0) {
@@ -368,6 +452,10 @@ function renderDrafts() {
 }
 
 function renderPapers() {
+  if (state.searchResults !== null) {
+    renderSearchResults();
+    return;
+  }
   const container = document.querySelector("#paperList");
   document.querySelector("#paperCount").textContent = String(state.papers.length);
   if (state.papers.length === 0) {
@@ -888,7 +976,7 @@ function calculateFitWidthScale(page) {
 
 function createPageShell(pageNumber, referenceViewport) {
   const shell = document.createElement("div");
-  shell.className = "pdf-page loading";
+  shell.className = "pdf-page-wrapper pdf-page loading";
   shell.setAttribute("data-page-number", String(pageNumber));
   shell.style.width = `${referenceViewport.width}px`;
   shell.style.minHeight = `${referenceViewport.height}px`;
@@ -1021,6 +1109,16 @@ function scrollToPage(pageNumber, behavior = "smooth") {
   shell.scrollIntoView({ block: "start", behavior });
 }
 
+function scrollToSearchPage(pageNumber) {
+  const targetPage = Number(pageNumber);
+  if (!Number.isInteger(targetPage) || targetPage < 1) return;
+  const page = document.querySelector(`.pdf-page-wrapper[data-page-number="${targetPage}"]`);
+  if (!page) return;
+  page.scrollIntoView({ block: "start", behavior: "auto" });
+  page.classList.add("search-hit");
+  window.setTimeout(() => page.classList.remove("search-hit"), 1800);
+}
+
 async function renderContinuousPages({ preservePage = false, targetPage = null } = {}) {
   const pdfDocument = state.reader.document;
   if (!pdfDocument) return;
@@ -1047,7 +1145,7 @@ async function renderContinuousPages({ preservePage = false, targetPage = null }
   requestAnimationFrame(() => scrollToPage(state.reader.pageNumber, "auto"));
 }
 
-async function openPaperReader(paper) {
+async function openReader(paper, { targetPage = null } = {}) {
   await closeReaderDocument();
   showReaderView();
   renderPapers();
@@ -1055,7 +1153,8 @@ async function openPaperReader(paper) {
   const sourceUrl = `/api/papers/${paper.id}/file`;
   const bookmarkPage = normalizeReaderPage(paper.bookmarkPage);
   const lastReadPage = normalizeReaderPage(paper.lastReadPage);
-  const resumePage = bookmarkPage || lastReadPage || 1;
+  const requestedPage = normalizeReaderPage(targetPage);
+  const resumePage = requestedPage || bookmarkPage || lastReadPage || 1;
   state.reader.paperId = paper.id;
   state.reader.pageNumber = resumePage;
   state.reader.pageCount = 0;
@@ -1077,8 +1176,11 @@ async function openPaperReader(paper) {
     state.reader.document = await state.reader.loadingTask.promise;
     state.reader.pageCount = state.reader.document.numPages;
     await renderContinuousPages({ targetPage: resumePage });
+    if (requestedPage) requestAnimationFrame(() => scrollToSearchPage(requestedPage));
     setStatus(
-      bookmarkPage
+      requestedPage
+        ? `已跳到搜索命中：第 ${Math.min(requestedPage, state.reader.pageCount)} 页`
+        : bookmarkPage
         ? `已跳到书签：第 ${Math.min(bookmarkPage, state.reader.pageCount)} 页`
         : lastReadPage
           ? `已回到上次阅读：第 ${Math.min(lastReadPage, state.reader.pageCount)} 页`
@@ -1163,6 +1265,10 @@ async function moveSelectedPaperToTrash() {
   }
 }
 
+async function openPaperReader(paper) {
+  return openReader(paper);
+}
+
 async function loadDrafts() {
   state.drafts = await api("/api/drafts");
   renderDrafts();
@@ -1171,7 +1277,6 @@ async function loadDrafts() {
 async function loadPapers() {
   const params = new URLSearchParams();
   const query = document.querySelector("#searchInput").value.trim();
-  if (query) params.set("query", query);
   const map = {
     themes: "#filterThemes",
     regions: "#filterRegions",
@@ -1184,7 +1289,29 @@ async function loadPapers() {
     const value = document.querySelector(selector).value.trim();
     if (value) params.set(name, value);
   }
+  state.searchError = "";
+  state.searchTotal = 0;
+  if (query) {
+    state.searchResults = [];
+    state.searchLoading = true;
+    params.set("q", query);
+    params.set("scope", document.querySelector("#searchScope").value);
+    renderPapers();
+    try {
+      const result = await api(`/api/search?${params.toString()}`);
+      state.searchResults = result.items || [];
+      state.searchTotal = result.total || 0;
+    } catch (error) {
+      state.searchError = error.message;
+    } finally {
+      state.searchLoading = false;
+    }
+    renderPapers();
+    return;
+  }
+  state.searchResults = null;
   state.papers = await api(`/api/papers?${params.toString()}`);
+  document.querySelector("#searchResultStatus").hidden = true;
   renderPapers();
 }
 
@@ -1488,6 +1615,24 @@ document.querySelector("#draftList").addEventListener("click", (event) => {
 document.querySelector("#paperList").addEventListener("click", async (event) => {
   const item = event.target.closest("[data-paper-id]");
   if (!item) return;
+  const hit = state.searchResults?.find((entry) => entry.paperId === Number(item.dataset.paperId));
+  if (hit) {
+    try {
+      const paper = (await loadAllPapers()).find((entry) => entry.id === hit.paperId);
+      if (!paper) throw new Error("未找到论文");
+      fillFormFromPaper(paper);
+      if (hit.matchScope === "fulltext") {
+        await openReader(paper, { targetPage: hit.pageNumber });
+      } else {
+        showPaperListView();
+        renderPapers();
+        setStatus("已选择论文详情");
+      }
+    } catch (error) {
+      setStatus(error.message);
+    }
+    return;
+  }
   const paper = state.papers.find((entry) => entry.id === Number(item.dataset.paperId));
   if (!paper) return;
   fillFormFromPaper(paper);
@@ -1601,6 +1746,7 @@ document.querySelector("#searchButton").addEventListener("click", loadPapers);
 document.querySelector("#searchInput").addEventListener("keydown", (event) => {
   if (event.key === "Enter") loadPapers();
 });
+document.querySelector("#searchScope").addEventListener("change", () => void loadPapers());
 document.querySelector("#clearFiltersButton").addEventListener("click", async () => {
   for (const selector of [
     "#searchInput",
@@ -1613,6 +1759,7 @@ document.querySelector("#clearFiltersButton").addEventListener("click", async ()
   ]) {
     document.querySelector(selector).value = "";
   }
+  document.querySelector("#searchScope").value = "all";
   await loadPapers();
 });
 

@@ -44,6 +44,14 @@
         <section class="panel-section search-section">
           <h2>检索</h2>
           <input id="searchInput" type="search" placeholder="标题、作者、摘要、笔记" />
+          <label class="search-scope-label">范围
+            <select id="searchScope">
+              <option value="all">全部</option>
+              <option value="metadata">元数据</option>
+              <option value="fulltext">全文</option>
+              <option value="notes">笔记</option>
+            </select>
+          </label>
         </section>
         <section class="panel-section filter-section">
           <h2>筛选</h2>
@@ -75,6 +83,7 @@
             </div>
             <span id="paperCount" class="count-pill">0</span>
           </div>
+          <div id="searchResultStatus" class="search-result-status" aria-live="polite" hidden></div>
           <div id="paperList" class="paper-list"></div>
         </div>
         <div id="readerView" class="panel-view reader-view" hidden>

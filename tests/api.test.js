@@ -1525,6 +1525,50 @@ test("API translation maps provider failures to a clear error", async () => {
   );
 });
 
+test("search API validates parameters, applies filters, and never leaks FTS errors", async () => {
+  await withServer(async (baseUrl, { dbPath }) => {
+    const repo = new PaperRepository(dbPath);
+    const draftId = repo.createDraft({
+      title: "Loess lake sediment study",
+      authors: ["Search Author"],
+      classification: { regions: ["North"] },
+      confidence: {},
+      evidence: {}
+    });
+    const paperId = repo.confirmDraft(draftId);
+    repo.replacePaperPages(paperId, [
+      { pageNumber: 1, text: "Introduction", source: "pdf" },
+      { pageNumber: 2, text: "Loess and lake sediment results", source: "pdf" }
+    ]);
+
+    const hit = await fetch(`${baseUrl}/api/search?q=loess&scope=fulltext&regions=North&page=1&pageSize=1`);
+    assert.equal(hit.status, 200);
+    const body = await hit.json();
+    assert.equal(body.total, 1);
+    assert.equal(body.items[0].paperId, paperId);
+    assert.equal(body.items[0].pageNumber, 2);
+    assert.equal(body.items[0].matchScope, "fulltext");
+
+    for (const query of [
+      "scope=invalid",
+      "page=0",
+      "page=abc",
+      "pageSize=0"
+    ]) {
+      const response = await fetch(`${baseUrl}/api/search?q=loess&${query}`);
+      assert.equal(response.status, 400);
+    }
+
+    const hostile = await fetch(`${baseUrl}/api/search?q=${encodeURIComponent('loess" OR *')}`);
+    assert.equal(hostile.status, 200);
+    assert.doesNotMatch(await hostile.text(), /SQLITE|near "OR"/i);
+
+    const empty = await fetch(`${baseUrl}/api/search?q=%21%21%21`);
+    assert.equal(empty.status, 200);
+    assert.deepEqual((await empty.json()).items, []);
+  });
+});
+
 test("API reindex requires confirmation and reports indexed page sources", async () => {
   await withServer(
     async (baseUrl, { dbPath, filesDir, dir }) => {

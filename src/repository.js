@@ -1,6 +1,7 @@
 import { openDb } from "./database.js";
 import { mergePaperData, metadataFields, noteFields } from "./paperData.js";
 import { normalizeDoi, normalizeTitle, titleBigrams, titleSimilarity } from "./duplicates.js";
+import { buildSearchQuery, matchesSearchGroups } from "./search.js";
 
 const draftJsonFields = {
   authors: "authors_json",
@@ -200,6 +201,14 @@ function normalizePageNumber(value) {
 
 function mergeUnique(...lists) {
   return [...new Set(lists.flat().filter(Boolean))];
+}
+
+export class SearchQueryError extends Error {
+  constructor() {
+    super("Search query is invalid");
+    this.name = "SearchQueryError";
+    this.status = 400;
+  }
 }
 
 function summarizePages(pages) {
@@ -564,6 +573,54 @@ function makeSearchText(paper) {
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
+}
+
+const searchScopes = new Set(["all", "metadata", "fulltext", "notes"]);
+const searchScopeOrder = { fulltext: 0, metadata: 1, notes: 2 };
+
+function searchMetadataText(paper) {
+  return [
+    paper.title,
+    paper.authors?.join(" "),
+    paper.journal,
+    paper.year,
+    paper.doi,
+    paper.abstract,
+    paper.keywords?.join(" "),
+    paper.themes?.join(" "),
+    paper.regions?.join(" "),
+    paper.periods?.join(" "),
+    paper.materials?.join(" "),
+    paper.methods?.join(" "),
+    paper.proxies?.join(" ")
+  ].filter(Boolean).join(" ");
+}
+
+function searchNotesText(paper) {
+  return [
+    paper.notesResearchQuestion,
+    paper.notesRegion,
+    paper.notesMaterialsMethods,
+    paper.notesChronology,
+    paper.notesCoreFindings,
+    paper.notesLimits,
+    paper.notesQuotePoints,
+    paper.notesPersonal
+  ].filter(Boolean).join(" ");
+}
+
+function filterPaper(paper, filters) {
+  return Object.entries(filters || {}).every(([field, expectedValues]) => {
+    const expected = Array.isArray(expectedValues) ? expectedValues.filter(Boolean) : [];
+    if (expected.length === 0) return true;
+    const actual = Array.isArray(paper[field]) ? paper[field] : [];
+    return expected.every((value) => actual.includes(value));
+  });
+}
+
+function truncateSearchText(value, maxLength = 240) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
 }
 
 export class PaperRepository {
@@ -1356,6 +1413,108 @@ export class PaperRepository {
         if (db.isTransaction) db.exec("ROLLBACK");
         throw error;
       }
+    });
+  }
+
+  searchLibrary({ query = "", scope = "all", filters = {}, page = 1, pageSize = 20 } = {}) {
+    if (!searchScopes.has(scope)) throw new SearchQueryError();
+    if (!Number.isInteger(page) || page < 1 || !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) {
+      throw new SearchQueryError();
+    }
+
+    const search = buildSearchQuery(query);
+    if (!search) return { items: [], page, pageSize, total: 0 };
+
+    return this.withDb((db) => {
+      const papers = db.prepare(`
+        SELECT * FROM papers
+        WHERE deleted_at IS NULL AND merged_into_id IS NULL
+        ORDER BY id ASC
+      `).all().map(mapPaper).filter((paper) => filterPaper(paper, filters));
+      const papersById = new Map(papers.map((paper) => [paper.id, paper]));
+      const items = [];
+
+      if (scope === "all" || scope === "metadata") {
+        for (const paper of papers) {
+          const text = searchMetadataText(paper);
+          if (!matchesSearchGroups(text, search.groups)) continue;
+          items.push({
+            paperId: paper.id,
+            title: paper.title,
+            authors: paper.authors,
+            year: paper.year,
+            matchScope: "metadata",
+            pageNumber: null,
+            snippet: truncateSearchText(text),
+            highlightTerms: search.highlightTerms,
+            score: 0
+          });
+        }
+      }
+
+      if (scope === "all" || scope === "notes") {
+        for (const paper of papers) {
+          const text = searchNotesText(paper);
+          if (!matchesSearchGroups(text, search.groups)) continue;
+          items.push({
+            paperId: paper.id,
+            title: paper.title,
+            authors: paper.authors,
+            year: paper.year,
+            matchScope: "notes",
+            pageNumber: null,
+            snippet: truncateSearchText(text),
+            highlightTerms: search.highlightTerms,
+            score: 0
+          });
+        }
+      }
+
+      if (scope === "all" || scope === "fulltext") {
+        let rows;
+        try {
+          rows = db.prepare(`
+            SELECT pp.paper_id, pp.page_number,
+              snippet(paper_pages_fts, 0, '', '', '...', 24) AS snippet,
+              bm25(paper_pages_fts) AS score
+            FROM paper_pages_fts
+            JOIN paper_pages AS pp ON pp.id = paper_pages_fts.rowid
+            WHERE paper_pages_fts MATCH ?
+            ORDER BY score ASC, pp.paper_id ASC, pp.page_number ASC
+          `).all(search.match);
+        } catch {
+          throw new SearchQueryError();
+        }
+        for (const row of rows) {
+          const paper = papersById.get(row.paper_id);
+          if (!paper) continue;
+          items.push({
+            paperId: paper.id,
+            title: paper.title,
+            authors: paper.authors,
+            year: paper.year,
+            matchScope: "fulltext",
+            pageNumber: row.page_number,
+            snippet: String(row.snippet || ""),
+            highlightTerms: search.highlightTerms,
+            score: Number(row.score) || 0
+          });
+        }
+      }
+
+      items.sort((left, right) =>
+        left.score - right.score ||
+        searchScopeOrder[left.matchScope] - searchScopeOrder[right.matchScope] ||
+        left.paperId - right.paperId ||
+        (left.pageNumber || 0) - (right.pageNumber || 0)
+      );
+      const offset = (page - 1) * pageSize;
+      return {
+        items: items.slice(offset, offset + pageSize),
+        page,
+        pageSize,
+        total: items.length
+      };
     });
   }
 

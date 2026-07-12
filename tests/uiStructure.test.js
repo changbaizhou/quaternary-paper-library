@@ -133,6 +133,19 @@ test("paper detail exposes metadata save and notes autosave wiring", async () =>
   assert.match(script, /NOTE_AUTOSAVE_DELAY_MS/);
 });
 
+test("frontend exposes safe search scopes and page-targeted hit navigation", async () => {
+  const html = await readFile("public/index.html", "utf8");
+  const script = await readFile("public/app.js", "utf8");
+
+  assert.match(html, /id="searchScope"/);
+  assert.match(script, /\/api\/search\?/);
+  assert.match(script, /openReader\(paper, \{\s*targetPage/);
+  assert.match(script, /\.pdf-page-wrapper\[data-page-number\]|pdf-page-wrapper/);
+  assert.match(script, /scrollIntoView/);
+  assert.match(script, /search-hit/);
+  assert.match(script, /textContent/);
+});
+
 test("paper detail exposes a confirmed move-to-trash workflow", async () => {
   const html = await readFile("public/index.html", "utf8");
   const script = await readFile("public/app.js", "utf8");

@@ -87,6 +87,27 @@ const thresholds = {
   proxies: 1
 };
 
+export const quaternarySearchTermPairs = [
+  ["黄土", "loess"],
+  ["古土壤", "palaeosol"],
+  ["全新世", "Holocene"],
+  ["更新世", "Pleistocene"],
+  ["孢粉", "pollen"],
+  ["湖泊沉积", "lake sediment"],
+  ["黄河", "Yellow River"],
+  ["青藏高原", "Qinghai-Tibet Plateau"]
+];
+
+export function expandQuaternarySearchTerms(value) {
+  const normalized = String(value || "").normalize("NFKC").toLowerCase();
+  const terms = [String(value || "").normalize("NFKC")];
+  for (const pair of quaternarySearchTermPairs) {
+    const match = pair.find((term) => term.normalize("NFKC").toLowerCase() === normalized);
+    if (match) terms.push(pair.find((term) => term !== match));
+  }
+  return [...new Set(terms.filter(Boolean))];
+}
+
 function normalize(value) {
   return String(value || "").normalize("NFKC").toLowerCase();
 }
