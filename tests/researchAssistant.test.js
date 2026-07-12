@@ -5,6 +5,7 @@ import {
   answerResearchQuestion,
   buildResearchContext,
   buildResearchPrompt,
+  createQwenResearchProvider,
   normalizeResearchQuestion,
   parseAndValidateResearchAnswer
 } from "../src/researchAssistant.js";
@@ -112,4 +113,79 @@ test("uses an injected provider and validates its fenced response", async () => 
     }
   });
   assert.deepEqual(result, { answer: "Evidence answer", citations: ["P1-1"] });
+});
+
+test("downgrades a provider conclusion without citations to insufficient evidence", async () => {
+  const result = await answerResearchQuestion({
+    question: "A broad question",
+    context: { items: [{ citationId: "P1-1" }], combinedText: "[P1-1] evidence" },
+    provider: async () => ({ answer: "Unsupported conclusion", citations: [] })
+  });
+
+  assert.deepEqual(result, { answer: "当前资料库证据不足", citations: [] });
+});
+
+test("Qwen research requests JSON output and retries one missing-citation response", async () => {
+  const requests = [];
+  const responses = [
+    { answer: "Unsupported answer", citations: [] },
+    { answer: "Supported answer", citations: ["P1-1"] }
+  ];
+  const provider = createQwenResearchProvider({
+    qwenApiKey: "test-key",
+    fetchImpl: async (_url, init) => {
+      requests.push(JSON.parse(init.body));
+      const content = JSON.stringify(responses.shift());
+      return new Response(JSON.stringify({ choices: [{ message: { content } }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    }
+  });
+  const context = {
+    items: [{ citationId: "P1-1", paperId: 1, pageNumber: 1, title: "Paper", text: "Evidence" }]
+  };
+
+  const payload = await provider({ prompt: "Answer with P1-1", context });
+
+  assert.deepEqual(parseAndValidateResearchAnswer(payload, context), {
+    answer: "Supported answer",
+    citations: ["P1-1"]
+  });
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests[0].response_format, { type: "json_object" });
+  assert.match(requests[1].messages.at(-1).content, /P1-1/);
+});
+
+test("Qwen research falls back when an OpenAI-compatible endpoint rejects response_format", async () => {
+  const requests = [];
+  const provider = createQwenResearchProvider({
+    qwenApiKey: "test-key",
+    fetchImpl: async (_url, init) => {
+      const request = JSON.parse(init.body);
+      requests.push(request);
+      if (request.response_format) return new Response("unsupported", { status: 400 });
+      const corrected = requests.filter((item) => !item.response_format).length > 1;
+      const content = corrected
+        ? JSON.stringify({ answer: "Supported answer", citations: ["P1-1"] })
+        : JSON.stringify({ answer: "Unsupported answer", citations: [] });
+      return new Response(JSON.stringify({ choices: [{ message: { content } }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    }
+  });
+  const context = {
+    items: [{ citationId: "P1-1", paperId: 1, pageNumber: 1, title: "Paper", text: "Evidence" }]
+  };
+
+  const payload = await provider({ prompt: "Answer with P1-1", context });
+
+  assert.deepEqual(parseAndValidateResearchAnswer(payload, context), {
+    answer: "Supported answer",
+    citations: ["P1-1"]
+  });
+  assert.equal(requests.length, 3);
+  assert.equal(requests[1].response_format, undefined);
+  assert.match(requests[2].messages.at(-1).content, /P1-1/);
 });

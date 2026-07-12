@@ -155,28 +155,62 @@ export async function answerResearchQuestion({ question, context, provider }) {
     const result = await provider({ question: normalizedQuestion, context, prompt: buildResearchPrompt(normalizedQuestion, context) });
     return parseAndValidateResearchAnswer(result, context);
   } catch (error) {
-    if (error instanceof ResearchAssistantError) throw error;
+    if (error instanceof ResearchAssistantError) {
+      if (error.message === "research conclusion is missing citations") {
+        return { answer: "当前资料库证据不足", citations: [] };
+      }
+      throw error;
+    }
     throw new ResearchAssistantError(502, "研究问答服务暂时不可用", error);
   }
 }
 
 export function createQwenResearchProvider(options = {}) {
-  return async ({ prompt }) => {
-    const payload = await requestQwenChatCompletion({
+  let supportsStructuredOutput = true;
+  return async ({ prompt, context }) => {
+    const systemMessage = {
+      role: "system",
+      content: "You are a careful research assistant. Return one JSON object only. Every supported conclusion must cite at least one supplied citationId."
+    };
+    const requestOnce = (messages, structured) => requestQwenChatCompletion({
       options: {
         qwenApiKey: options.qwenApiKey,
         qwenModel: options.qwenModel,
         qwenBaseUrl: options.qwenBaseUrl,
         qwenEndpoint: options.qwenEndpoint,
         timeoutMs: options.timeoutMs || 15000,
-        temperature: 0.1
+        temperature: 0.1,
+        ...(structured ? { responseFormat: { type: "json_object" } } : {})
       },
       fetchImpl: options.fetchImpl,
-      messages: [
-        { role: "system", content: "You are a careful research assistant. Follow the JSON output contract." },
-        { role: "user", content: prompt }
-      ]
+      messages
     });
-    return payload;
+    const request = async (messages) => {
+      if (!supportsStructuredOutput) return requestOnce(messages, false);
+      try {
+        return await requestOnce(messages, true);
+      } catch {
+        supportsStructuredOutput = false;
+        return requestOnce(messages, false);
+      }
+    };
+    const messages = [systemMessage, { role: "user", content: prompt }];
+    const firstPayload = await request(messages);
+    try {
+      parseAndValidateResearchAnswer(firstPayload, context);
+      return firstPayload;
+    } catch (error) {
+      if (!(error instanceof ResearchAssistantError)) throw error;
+      const allowed = (context?.items || []).map((item) => item.citationId).join(", ");
+      const previous = extractResponseText(firstPayload) || "{}";
+      return request([
+        ...messages,
+        { role: "assistant", content: previous },
+        {
+          role: "user",
+          content: `Correct the JSON response. Use only these citation IDs: ${allowed}. A supported conclusion requires at least one citation. If evidence is insufficient, state that explicitly and use an empty citations array.`
+        }
+      ]);
+    }
   };
 }

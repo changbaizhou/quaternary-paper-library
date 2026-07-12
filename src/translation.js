@@ -181,7 +181,8 @@ export async function requestQwenChatCompletion({ messages, options = {}, fetchI
       body: JSON.stringify({
         model,
         messages,
-        temperature: options.temperature ?? 0.2
+        temperature: options.temperature ?? 0.2,
+        ...(options.responseFormat ? { response_format: options.responseFormat } : {})
       }),
       ...(options.timeoutMs ? { signal: AbortSignal.timeout(options.timeoutMs) } : {})
     });
