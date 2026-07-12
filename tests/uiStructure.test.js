@@ -191,6 +191,29 @@ test("paper detail exposes a confirmed move-to-trash workflow", async () => {
   assert.match(script, /method:\s*"DELETE"/);
 });
 
+test("citation UI exposes stable metadata, selection, and one batch export menu", async () => {
+  const html = await readFile("public/index.html", "utf8");
+  const script = await readFile("public/app.js", "utf8");
+  const css = await readFile("public/styles.css", "utf8");
+
+  assert.match(html, /id="citationExportMenu"/);
+  assert.match(html, /id="citationExportFormat"/);
+  assert.match(html, /id="exportSelectedCitations"/);
+  assert.match(html, /id="copyInTextCitationButton"/);
+  assert.match(html, /id="copyBibliographyButton"/);
+  assert.match(html, /id="citationKeyField"/);
+  assert.match(html, /id="citationStatusField"/);
+  assert.match(script, /type="checkbox"/);
+  assert.match(script, /stopPropagation\(\)/);
+  assert.match(script, /\/api\/citations\/export\?format=/);
+  assert.match(script, /navigator\.clipboard\.writeText/);
+  assert.match(script, /Clipboard/);
+  assert.match(script, /escapeHtml\(paper\.title/);
+  assert.match(css, /\.paper-select-checkbox/);
+  assert.match(css, /width:\s*18px/);
+  assert.match(css, /#annotationSelectionToolbar\[hidden\]/);
+});
+
 test("trash confirmation keeps its bound target when selection changes", async () => {
   const script = await readFile("public/app.js", "utf8");
   const targetHelpers = script.match(/function captureTrashTarget[\s\S]*?function isTrashTargetSelected[\s\S]*?\n}/);

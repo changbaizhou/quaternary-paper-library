@@ -73,7 +73,7 @@ test("initDb creates a missing nested database parent before locking", async () 
     const db = openDb(dbPath);
     const versions = db.prepare("SELECT version FROM schema_migrations").all();
     db.close();
-    assert.deepEqual(versions.map((item) => item.version), [1, 2, 3, 4]);
+    assert.deepEqual(versions.map((item) => item.version), [1, 2, 3, 4, 5]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -237,7 +237,7 @@ test("initDb waits for an existing proper-lockfile lock", async () => {
     const migrated = openDb(dbPath);
     const versions = migrated.prepare("SELECT version FROM schema_migrations").all();
     migrated.close();
-    assert.deepEqual(versions.map((item) => item.version), [1, 2, 3, 4]);
+    assert.deepEqual(versions.map((item) => item.version), [1, 2, 3, 4, 5]);
   } finally {
     release?.();
     await rm(dir, { recursive: true, force: true });
@@ -274,7 +274,7 @@ test("lock worker cleans up after acquisition failure", async () => {
     const migrated = openDb(dbPath);
     const versions = migrated.prepare("SELECT version FROM schema_migrations").all();
     migrated.close();
-    assert.deepEqual(versions.map((item) => item.version), [1, 2, 3, 4]);
+    assert.deepEqual(versions.map((item) => item.version), [1, 2, 3, 4, 5]);
   } finally {
     release?.();
     await rm(dir, { recursive: true, force: true });
@@ -308,7 +308,7 @@ test("lock worker times out acquisition and leaves no owned lock", async () => {
     const migrated = openDb(dbPath);
     const versions = migrated.prepare("SELECT version FROM schema_migrations").all();
     migrated.close();
-    assert.deepEqual(versions.map((item) => item.version), [1, 2, 3, 4]);
+    assert.deepEqual(versions.map((item) => item.version), [1, 2, 3, 4, 5]);
   } finally {
     release?.();
     await rm(dir, { recursive: true, force: true });
@@ -351,7 +351,7 @@ test("compromised worker lock fails safely and permits retry", async () => {
     const migrated = openDb(dbPath);
     const versions = migrated.prepare("SELECT version FROM schema_migrations").all();
     migrated.close();
-    assert.deepEqual(versions.map((item) => item.version), [1, 2, 3, 4]);
+    assert.deepEqual(versions.map((item) => item.version), [1, 2, 3, 4, 5]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -379,7 +379,7 @@ test("initDb reclaims a stale proper-lockfile lock", async () => {
     const migrated = openDb(dbPath);
     const versions = migrated.prepare("SELECT version FROM schema_migrations").all();
     migrated.close();
-    assert.deepEqual(versions.map((item) => item.version), [1, 2, 3, 4]);
+    assert.deepEqual(versions.map((item) => item.version), [1, 2, 3, 4, 5]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -416,7 +416,7 @@ test("initDb runs versioned migrations without losing existing papers", async ()
       after.close();
     }
 
-    assert.deepEqual(migrations.map((item) => item.version), [1, 2, 3, 4]);
+    assert.deepEqual(migrations.map((item) => item.version), [1, 2, 3, 4, 5]);
     assert.ok(columns.includes("normalized_doi"));
     assert.ok(columns.includes("normalized_title"));
     assert.ok(columns.includes("file_sha256"));
@@ -502,7 +502,7 @@ test("initDb snapshots and fully migrates pre-v1 file records exactly once", asy
     const migratedPaper = migrated.prepare("SELECT title, version FROM papers").get();
     migrated.close();
 
-    assert.deepEqual(versions.map((item) => item.version), [1, 2, 3, 4]);
+    assert.deepEqual(versions.map((item) => item.version), [1, 2, 3, 4, 5]);
     for (const column of ["normalized_doi", "normalized_title", "file_sha256", "version", "deleted_at", "merged_into_id"]) {
       assert.ok(paperColumns.includes(column), `missing papers.${column}`);
     }
@@ -613,7 +613,7 @@ test("initDb rolls back migration failure, releases its lock, and retries", asyn
     const retriedColumns = retried.prepare("PRAGMA table_info(papers)").all().map((item) => item.name);
     retried.close();
 
-    assert.deepEqual(retriedVersions.map((item) => item.version), [1, 2, 3, 4]);
+    assert.deepEqual(retriedVersions.map((item) => item.version), [1, 2, 3, 4, 5]);
     assert.ok(retriedColumns.includes("normalized_doi"));
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -656,7 +656,7 @@ test("initDb serializes concurrent initialization across processes", async () =>
     db.close();
 
     assert.equal(snapshots.length, 1);
-    assert.deepEqual(versions.map((item) => item.version), [1, 2, 3, 4]);
+    assert.deepEqual(versions.map((item) => item.version), [1, 2, 3, 4, 5]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -699,7 +699,7 @@ test("initDb remains serialized across repeated concurrent initialization rounds
       migrated.close();
 
       assert.equal(snapshots.length, 1);
-      assert.deepEqual(versions.map((item) => item.version), [1, 2, 3, 4]);
+      assert.deepEqual(versions.map((item) => item.version), [1, 2, 3, 4, 5]);
     }
   } finally {
     await rm(dir, { recursive: true, force: true });

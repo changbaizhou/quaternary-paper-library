@@ -1,5 +1,6 @@
 import { openDb } from "./database.js";
 import { mergePaperData, metadataFields, noteFields } from "./paperData.js";
+import { generateCitationKey, validateCitationMetadata } from "./citations.js";
 import { normalizeDoi, normalizeTitle, titleBigrams, titleSimilarity } from "./duplicates.js";
 import { buildSearchQuery, matchesSearchGroups } from "./search.js";
 import {
@@ -50,10 +51,17 @@ const paperColumns = {
   notesCoreFindings: "notes_core_findings",
   notesLimits: "notes_limits",
   notesQuotePoints: "notes_quote_points",
-  notesPersonal: "notes_personal"
+  notesPersonal: "notes_personal",
+  volume: "volume",
+  issue: "issue",
+  pages: "pages",
+  publisher: "publisher",
+  publicationType: "publication_type"
 };
 
 const editableFields = [...metadataFields, ...noteFields];
+const citationMetadataFields = ["volume", "issue", "pages", "publisher", "publicationType"];
+const paperEditableFields = [...editableFields, ...citationMetadataFields];
 const arrayPaperFields = new Set(["authors", "keywords", "themes", "regions", "periods", "materials", "methods", "proxies"]);
 
 function toJson(value, fallback) {
@@ -126,6 +134,14 @@ function mapPaper(row) {
     notesLimits: row.notes_limits,
     notesQuotePoints: row.notes_quote_points,
     notesPersonal: row.notes_personal,
+    citationKey: row.citation_key,
+    citationStatus: row.citation_status,
+    citationCheckedAt: row.citation_checked_at,
+    volume: row.volume,
+    issue: row.issue,
+    pages: row.pages,
+    publisher: row.publisher,
+    publicationType: row.publication_type,
     bookmarkPage: row.bookmark_page,
     lastReadPage: row.last_read_page,
     version: row.version,
@@ -249,6 +265,23 @@ function normalizePageNumber(value) {
 
 function mergeUnique(...lists) {
   return [...new Set(lists.flat().filter(Boolean))];
+}
+
+export class CitationValidationError extends Error {
+  constructor(message, missingFields = []) {
+    super(message);
+    this.name = "CitationValidationError";
+    this.status = 400;
+    this.missingFields = missingFields;
+  }
+}
+
+export class CitationKeyError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "CitationKeyError";
+    this.status = 400;
+  }
 }
 
 export class SearchQueryError extends Error {
@@ -948,9 +981,18 @@ export class PaperRepository {
         notesCoreFindings: overrides.notesCoreFindings || "",
         notesLimits: overrides.notesLimits || "",
         notesQuotePoints: overrides.notesQuotePoints || "",
-        notesPersonal: overrides.notesPersonal || ""
+        notesPersonal: overrides.notesPersonal || "",
+        volume: overrides.volume || "",
+        issue: overrides.issue || "",
+        pages: overrides.pages || "",
+        publisher: overrides.publisher || "",
+        publicationType: overrides.publicationType || "article"
       };
       const searchText = makeSearchText(paper);
+      const existingKeys = new Set(
+        db.prepare("SELECT citation_key FROM papers WHERE citation_key <> ''").all().map((row) => row.citation_key)
+      );
+      const citationKey = generateCitationKey(paper, existingKeys);
 
       const result = db
         .prepare(`
@@ -961,8 +1003,9 @@ export class PaperRepository {
             periods_json, materials_json, methods_json, proxies_json, reading_status,
             notes_research_question, notes_region, notes_materials_methods,
             notes_chronology, notes_core_findings, notes_limits, notes_quote_points,
-            notes_personal, search_text
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            notes_personal, search_text, citation_key, citation_status, citation_checked_at,
+            volume, issue, pages, publisher, publication_type
+          ) VALUES (${Array(37).fill("?").join(", ")})
         `)
         .run(
           paper.sourceDraftId,
@@ -993,7 +1036,15 @@ export class PaperRepository {
           paper.notesLimits,
           paper.notesQuotePoints,
           paper.notesPersonal,
-          searchText
+          searchText,
+          citationKey,
+          "unverified",
+          null,
+          paper.volume,
+          paper.issue,
+          paper.pages,
+          paper.publisher,
+          paper.publicationType
         );
 
       const fileRow = db.prepare("SELECT id FROM paper_files WHERE draft_id = ?").get(id);
@@ -1516,12 +1567,12 @@ export class PaperRepository {
         if (changes.expectedVersion !== current.version) {
           throw new VersionConflictError(changes.expectedVersion, current.version);
         }
-        if (!editableFields.some((field) => Object.hasOwn(changes, field))) {
+        if (!paperEditableFields.some((field) => Object.hasOwn(changes, field))) {
           throw new TypeError("At least one editable paper field is required");
         }
 
         const paper = { ...current };
-        for (const field of editableFields) {
+        for (const field of paperEditableFields) {
           if (Object.hasOwn(changes, field)) paper[field] = changes[field];
         }
         if (!String(paper.title || "").trim()) {
@@ -1530,7 +1581,7 @@ export class PaperRepository {
 
         const assignments = [];
         const values = [];
-        for (const field of editableFields) {
+        for (const field of paperEditableFields) {
           assignments.push(`${paperColumns[field]} = ?`);
           values.push(Object.hasOwn(paperJsonFields, field) ? toJson(paper[field], []) : paper[field]);
         }
@@ -1547,6 +1598,74 @@ export class PaperRepository {
           throw new VersionConflictError(current.version, latest?.version);
         }
 
+        const updated = mapPaper(db.prepare("SELECT * FROM papers WHERE id = ?").get(id));
+        db.exec("COMMIT");
+        return updated;
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    });
+  }
+
+  updatePaperCitation(id, { expectedVersion, citationKey, status, regenerate = false } = {}) {
+    return this.withDb((db) => {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const currentRow = db.prepare("SELECT * FROM papers WHERE id = ?").get(id);
+        if (!currentRow) {
+          db.exec("ROLLBACK");
+          return null;
+        }
+        const current = mapPaper(currentRow);
+        if (current.deletedAt !== null || current.mergedIntoId !== null) {
+          throw new PaperStateError("Paper must be active before updating citation");
+        }
+        if (expectedVersion !== current.version) {
+          throw new VersionConflictError(expectedVersion, current.version);
+        }
+        if (status !== undefined && !["unverified", "verified", "incomplete"].includes(status)) {
+          throw new CitationValidationError("Invalid citation status");
+        }
+        if (regenerate !== undefined && typeof regenerate !== "boolean") {
+          throw new CitationKeyError("regenerate must be a boolean");
+        }
+
+        const existingKeys = new Set(
+          db.prepare("SELECT citation_key FROM papers WHERE citation_key <> '' AND id <> ?").all(id).map((row) => row.citation_key)
+        );
+        let nextKey = current.citationKey;
+        if (regenerate) {
+          nextKey = generateCitationKey({ ...current, citationKey: "" }, existingKeys);
+        } else if (citationKey !== undefined) {
+          if (typeof citationKey !== "string") throw new CitationKeyError("citationKey must be a string");
+          nextKey = citationKey.trim();
+        }
+        if (!nextKey) throw new CitationKeyError("citationKey must not be empty");
+        if (!/^[\p{L}\p{N}][\p{L}\p{N}._:-]*$/u.test(nextKey)) {
+          throw new CitationKeyError("citationKey contains invalid characters");
+        }
+        if (existingKeys.has(nextKey)) throw new CitationKeyError("citationKey is already in use");
+
+        const nextStatus = status || current.citationStatus || "unverified";
+        const validation = validateCitationMetadata({ ...current, citationStatus: nextStatus });
+        if (nextStatus === "verified" && validation.missingFields.length > 0) {
+          throw new CitationValidationError(
+            `Citation metadata is incomplete: ${validation.missingFields.join(", ")}`,
+            validation.missingFields
+          );
+        }
+        const checkedAt = nextStatus === "unverified" ? null : new Date().toISOString();
+        const result = db.prepare(`
+          UPDATE papers
+          SET citation_key = ?, citation_status = ?, citation_checked_at = ?,
+              version = version + 1, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND version = ?
+        `).run(nextKey, nextStatus, checkedAt, id, current.version);
+        if (Number(result.changes) !== 1) {
+          const latest = db.prepare("SELECT version FROM papers WHERE id = ?").get(id);
+          throw new VersionConflictError(current.version, latest?.version);
+        }
         const updated = mapPaper(db.prepare("SELECT * FROM papers WHERE id = ?").get(id));
         db.exec("COMMIT");
         return updated;

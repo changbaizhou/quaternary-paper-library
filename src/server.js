@@ -15,7 +15,8 @@ import {
   validateBackup
 } from "./backups.js";
 import { initDb } from "./database.js";
-import { exportBibtex, exportCsv, exportMarkdown } from "./exporters.js";
+import { exportBibtex, exportCslJson, exportCsv, exportMarkdown, exportRis } from "./exporters.js";
+import { formatApa7, formatGbt7714, formatInTextCitation, validateCitationMetadata } from "./citations.js";
 import { lookupDoiMetadata, lookupTitleMetadata } from "./metadata.js";
 import { extractOcrPages as defaultExtractOcrPages, extractOcrText as defaultExtractOcrText } from "./ocr.js";
 import { metadataFields, noteFields } from "./paperData.js";
@@ -42,7 +43,9 @@ import {
   PaperStateError,
   DraftNotFoundError,
   VersionConflictError,
-  SearchQueryError
+  SearchQueryError,
+  CitationKeyError,
+  CitationValidationError
 } from "./repository.js";
 import { classifyText } from "./taxonomy.js";
 import { translateText, TranslationError } from "./translation.js";
@@ -51,6 +54,7 @@ const upload = multer({ storage: multer.memoryStorage() });
 const arrayPaperFields = new Set([
   "authors", "keywords", "themes", "regions", "periods", "materials", "methods", "proxies"
 ]);
+const citationMetadataFields = ["volume", "issue", "pages", "publisher", "publicationType"];
 
 function validateExpectedVersion(value) {
   if (!Number.isInteger(value) || value < 1) {
@@ -72,6 +76,10 @@ function pickPaperChanges(body, allowedFields) {
     } else if (field === "year") {
       if (value !== null && (!Number.isInteger(value) || value < 1)) {
         throw new TypeError("year must be a positive integer or null");
+      }
+    } else if (field === "publicationType") {
+      if (!["article", "book", "chapter", "thesis", "report", "conference", "other"].includes(value)) {
+        throw new TypeError("publicationType is invalid");
       }
     } else if (typeof value !== "string") {
       throw new TypeError(`${field} must be a string`);
@@ -281,6 +289,10 @@ function respondToPaperStateError(error, response, next) {
     response.status(400).json({ error: error.message });
     return;
   }
+  if (error instanceof CitationKeyError || error instanceof CitationValidationError || error.status === 400) {
+    response.status(400).json({ error: error.message, missingFields: error.missingFields || undefined });
+    return;
+  }
   next(error);
 }
 
@@ -347,6 +359,15 @@ function publicPaper(paper) {
     notesLimits: paper.notesLimits,
     notesQuotePoints: paper.notesQuotePoints,
     notesPersonal: paper.notesPersonal,
+    citationKey: paper.citationKey,
+    citationStatus: paper.citationStatus,
+    citationCheckedAt: paper.citationCheckedAt,
+    citationMissingFields: validateCitationMetadata(paper).missingFields,
+    volume: paper.volume,
+    issue: paper.issue,
+    pages: paper.pages,
+    publisher: paper.publisher,
+    publicationType: paper.publicationType,
     bookmarkPage: paper.bookmarkPage,
     lastReadPage: paper.lastReadPage,
     deletedAt: paper.deletedAt,
@@ -354,6 +375,37 @@ function publicPaper(paper) {
     version: paper.version,
     status: paper.deletedAt ? "trash" : "active"
   };
+}
+
+const citationExportFormats = {
+  bibtex: { contentType: "application/x-bibtex; charset=utf-8", filename: "citations.bib", render: (papers) => exportBibtex(papers) },
+  ris: { contentType: "application/x-research-info-systems; charset=utf-8", filename: "citations.ris", render: (papers) => exportRis(papers) },
+  "csl-json": { contentType: "application/json; charset=utf-8", filename: "citations.json", render: (papers) => exportCslJson(papers) },
+  gbt7714: { contentType: "text/plain; charset=utf-8", filename: "citations-gbt7714.txt", render: (papers) => papers.map(formatGbt7714).join("\n\n") },
+  apa7: { contentType: "text/plain; charset=utf-8", filename: "citations-apa7.txt", render: (papers) => papers.map(formatApa7).join("\n\n") },
+  "in-text-apa": { contentType: "text/plain; charset=utf-8", filename: "citations-in-text-apa.txt", render: (papers) => papers.map((paper) => formatInTextCitation(paper, "apa")).join("\n") },
+  "in-text-gbt": { contentType: "text/plain; charset=utf-8", filename: "citations-in-text-gbt.txt", render: (papers) => papers.map((paper) => formatInTextCitation(paper, "gbt")).join("\n") }
+};
+
+function citationExportPapers(repo, query) {
+  if (!query.ids) throw Object.assign(new TypeError("ids is required"), { status: 400 });
+  if (query.ids === "all") return repo.searchPapers();
+  const rawIds = String(query.ids).split(",").map((value) => value.trim());
+  if (!rawIds.length || rawIds.some((value) => !/^\d+$/.test(value))) {
+    throw Object.assign(new TypeError("ids must be a comma-separated list of positive integers or all"), { status: 400 });
+  }
+  const ids = rawIds.map(Number);
+  if (new Set(ids).size !== ids.length || ids.some((id) => !Number.isSafeInteger(id) || id < 1)) {
+    throw Object.assign(new TypeError("ids must contain unique positive integers"), { status: 400 });
+  }
+  return ids.map((id) => {
+    const paper = repo.getPaper(id);
+    if (!paper) throw Object.assign(new Error("Paper not found"), { status: 404 });
+    if (paper.deletedAt !== null || paper.mergedIntoId !== null) {
+      throw Object.assign(new Error("Paper must be active before export"), { status: 400 });
+    }
+    return paper;
+  });
 }
 
 function publicAnnotation(annotation) {
@@ -1017,7 +1069,7 @@ export function createApp(options = {}) {
 
   app.patch("/api/papers/:id", (request, response, next) => {
     try {
-      updatePaperResponse(repo, request, response, metadataFields);
+      updatePaperResponse(repo, request, response, [...metadataFields, ...citationMetadataFields]);
     } catch (error) {
       next(error);
     }
@@ -1027,6 +1079,41 @@ export function createApp(options = {}) {
     try {
       updatePaperResponse(repo, request, response, noteFields);
     } catch (error) {
+      next(error);
+    }
+  });
+
+  app.patch("/api/papers/:id/citation", (request, response, next) => {
+    try {
+      validateExpectedVersion(request.body?.expectedVersion);
+      const id = Number(request.params.id);
+      if (!Number.isSafeInteger(id) || id < 1) {
+        response.status(400).json({ error: "Paper id must be a positive integer" });
+        return;
+      }
+      const paper = repo.updatePaperCitation(id, request.body || {});
+      if (!paper) {
+        response.status(404).json({ error: "Paper not found" });
+        return;
+      }
+      response.json(publicPaper(paper));
+    } catch (error) {
+      if (error instanceof PaperNotFoundError) {
+        response.status(404).json({ error: error.message });
+        return;
+      }
+      if (error instanceof VersionConflictError) {
+        response.status(409).json({ error: error.message });
+        return;
+      }
+      if (error instanceof PaperStateError) {
+        response.status(409).json({ error: error.message });
+        return;
+      }
+      if (error instanceof CitationKeyError || error instanceof CitationValidationError || error instanceof TypeError) {
+        response.status(400).json({ error: error.message, missingFields: error.missingFields || undefined });
+        return;
+      }
       next(error);
     }
   });
@@ -1123,6 +1210,32 @@ export function createApp(options = {}) {
       return;
     }
     response.status(404).json({ error: "Unsupported export format" });
+  });
+
+  app.get("/api/citations/export", (request, response, next) => {
+    try {
+      const format = citationExportFormats[request.query.format];
+      if (!format) {
+        response.status(400).json({ error: "Unsupported citation export format" });
+        return;
+      }
+      const papers = citationExportPapers(repo, request.query);
+      response
+        .status(200)
+        .set("Content-Type", format.contentType)
+        .set("Content-Disposition", `attachment; filename="${format.filename}"`)
+        .send(format.render(papers));
+    } catch (error) {
+      if (error.status === 404) {
+        response.status(404).json({ error: error.message });
+        return;
+      }
+      if (error.status === 400 || error instanceof TypeError) {
+        response.status(400).json({ error: error.message });
+        return;
+      }
+      next(error);
+    }
   });
 
   app.get(/.*/, (_request, response) => {

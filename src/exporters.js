@@ -1,16 +1,32 @@
+import { exportCslJson, exportRis, generateCitationKey } from "./citations.js";
+
 function arrayValue(value) {
   return Array.isArray(value) ? value : [];
 }
 
-function bibtexKey(paper) {
-  const firstAuthor = arrayValue(paper.authors)[0] || "paper";
-  const nameParts = firstAuthor.split(/\s+/).filter(Boolean);
-  const family = (nameParts[0] || firstAuthor).replace(/[^A-Za-z0-9]/g, "").toLowerCase();
-  const firstTitleWord = String(paper.title || "untitled")
-    .split(/\s+/)[0]
-    .replace(/[^A-Za-z0-9]/g, "")
-    .toLowerCase();
-  return `${family || "paper"}${paper.year || "nd"}${firstTitleWord || "paper"}`;
+function bibtexKey(paper, usedKeys) {
+  const key = paper.citationKey && usedKeys.has(paper.citationKey)
+    ? generateCitationKey({ ...paper, citationKey: "" }, usedKeys)
+    : generateCitationKey(paper, usedKeys);
+  usedKeys.add(key);
+  return key;
+}
+
+function bibtexEscape(value) {
+  return String(value ?? "")
+    .replaceAll("\\", "\\\\")
+    .replaceAll("{", "\\{")
+    .replaceAll("}", "\\}")
+    .replaceAll("&", "\\&")
+    .replaceAll("%", "\\%")
+    .replaceAll("$", "\\$")
+    .replaceAll("#", "\\#")
+    .replaceAll("_", "\\_")
+    .replace(/[\r\n\t]+/g, " ");
+}
+
+function bibtexType(type) {
+  return { article: "article", book: "book", chapter: "inbook", thesis: "phdthesis", report: "techreport", conference: "inproceedings", other: "misc" }[type] || "article";
 }
 
 function csvEscape(value) {
@@ -20,22 +36,30 @@ function csvEscape(value) {
 }
 
 export function exportBibtex(papers) {
+  const usedKeys = new Set();
   return papers
     .map((paper) => {
+      const key = bibtexKey(paper, usedKeys);
       const fields = [
         ["title", paper.title],
         ["author", arrayValue(paper.authors).join(" and ")],
         ["journal", paper.journal],
         ["year", paper.year],
+        ["volume", paper.volume],
+        ["number", paper.issue],
+        ["pages", paper.pages],
+        ["publisher", paper.publisher],
         ["doi", paper.doi],
         ["keywords", arrayValue(paper.keywords).join("; ")]
       ].filter(([, value]) => value);
-      return `@article{${bibtexKey(paper)},\n${fields
-        .map(([key, value]) => `  ${key} = {${value}}`)
+      return `@${bibtexType(paper.publicationType)}{${key},\n${fields
+        .map(([field, value]) => `  ${field} = {${bibtexEscape(value)}}`)
         .join(",\n")}\n}`;
     })
     .join("\n\n");
 }
+
+export { exportCslJson, exportRis };
 
 export function exportCsv(papers) {
   const columns = [

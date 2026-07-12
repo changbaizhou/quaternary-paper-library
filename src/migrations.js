@@ -1,5 +1,7 @@
 import { normalizeDoi, normalizeTitle } from "./duplicates.js";
 
+import { generateCitationKey } from "./citations.js";
+
 function tableExists(db, tableName) {
   return Boolean(
     db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(tableName)
@@ -241,6 +243,48 @@ const migrations = [
         );
         CREATE INDEX IF NOT EXISTS idx_research_cards_paper_annotation
           ON research_cards (paper_id, annotation_id);
+      `);
+    }
+  },
+  {
+    version: 5,
+    up(db) {
+      ensureColumn(db, "papers", "citation_key", "TEXT NOT NULL DEFAULT ''");
+      ensureColumn(db, "papers", "citation_status", "TEXT NOT NULL DEFAULT 'unverified' CHECK (citation_status IN ('unverified', 'verified', 'incomplete'))");
+      ensureColumn(db, "papers", "citation_checked_at", "TEXT");
+      ensureColumn(db, "papers", "volume", "TEXT NOT NULL DEFAULT ''");
+      ensureColumn(db, "papers", "issue", "TEXT NOT NULL DEFAULT ''");
+      ensureColumn(db, "papers", "pages", "TEXT NOT NULL DEFAULT ''");
+      ensureColumn(db, "papers", "publisher", "TEXT NOT NULL DEFAULT ''");
+      ensureColumn(db, "papers", "publication_type", "TEXT NOT NULL DEFAULT 'article' CHECK (publication_type IN ('article', 'book', 'chapter', 'thesis', 'report', 'conference', 'other'))");
+
+      const columns = new Set(db.prepare("PRAGMA table_info(papers)").all().map((column) => column.name));
+      const authorsExpression = columns.has("authors_json") ? "authors_json" : "'[]' AS authors_json";
+      const titleExpression = columns.has("title") ? "title" : "'' AS title";
+      const yearExpression = columns.has("year") ? "year" : "NULL AS year";
+      const rows = db.prepare(`
+        SELECT id, citation_key, ${authorsExpression}, ${titleExpression}, ${yearExpression}
+        FROM papers
+        ORDER BY id ASC
+      `).all();
+      const existingKeys = new Set(rows.map((row) => String(row.citation_key || "")).filter(Boolean));
+      const update = db.prepare("UPDATE papers SET citation_key = ? WHERE id = ?");
+      for (const row of rows) {
+        if (String(row.citation_key || "").trim()) continue;
+        let authors = [];
+        try {
+          authors = JSON.parse(row.authors_json || "[]");
+        } catch {
+          authors = [];
+        }
+        const citationKey = generateCitationKey({ authors, title: row.title, year: row.year }, existingKeys);
+        update.run(citationKey, row.id);
+        existingKeys.add(citationKey);
+      }
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_papers_citation_key
+        ON papers (citation_key)
+        WHERE citation_key <> '';
       `);
     }
   }

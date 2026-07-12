@@ -155,6 +155,47 @@ h3 {
   gap: 8px;
 }
 
+.citation-export-menu {
+  position: relative;
+}
+
+.citation-export-menu summary {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  padding: 7px 12px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  font-size: 12px;
+  list-style: none;
+}
+
+.citation-export-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.citation-export-popover {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 190px;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.citation-export-popover button {
+  width: 100%;
+}
+
 .header-actions {
   display: flex;
   align-items: center;
@@ -610,6 +651,7 @@ textarea:focus {
 
 .paper-item,
 .draft-item {
+  position: relative;
   width: 100%;
   display: grid;
   gap: 8px;
@@ -741,6 +783,26 @@ textarea:focus {
   color: var(--ink-soft);
 }
 
+.citation-heading-row {
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.citation-heading-row h3 {
+  margin: 0;
+}
+
+.citation-missing-fields {
+  color: var(--amber);
+  font-size: 11px;
+  text-align: right;
+}
+
+.citation-actions {
+  justify-content: flex-start;
+  margin-top: 10px;
+}
+
 .detail-section label + label,
 .detail-section .two-column + label,
 .detail-section label + .two-column {
@@ -779,6 +841,20 @@ textarea {
   margin-top: 12px;
   padding: 10px 0 2px;
   background: var(--surface);
+}
+
+.paper-select-checkbox {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  cursor: pointer;
+}
+
+.paper-item .paper-card-main {
+  padding-right: 28px;
 }
 
 .detail-action-group {
@@ -1023,6 +1099,7 @@ textarea {
   box-shadow: 0 6px 18px rgba(17, 39, 44, 0.2);
 }
 
+#annotationSelectionToolbar[hidden],
 .annotation-selection-toolbar[hidden] {
   display: none;
 }
@@ -1041,6 +1118,14 @@ textarea {
   padding: 12px;
   border-left: 1px solid var(--line);
   background: var(--surface-soft);
+}
+
+.list-heading-actions,
+.citation-heading-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
 }
 
 .annotation-sidebar-heading,

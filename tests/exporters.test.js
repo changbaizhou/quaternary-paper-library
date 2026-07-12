@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { exportBibtex, exportCsv, exportMarkdown } from "../src/exporters.js";
+import { exportBibtex, exportCslJson, exportCsv, exportMarkdown, exportRis } from "../src/exporters.js";
 
 const paper = {
   id: 1,
@@ -42,5 +42,30 @@ test("exportMarkdown includes note card", () => {
 
   assert.match(markdown, /## Holocene lake sediment record/);
   assert.match(markdown, /Monsoon variability is reconstructed\./);
+});
+
+test("exportBibtex preserves citation keys and escapes BibTeX text", () => {
+  const bibtex = exportBibtex([{
+    citationKey: "stable-key",
+    title: "A {Study} & More",
+    authors: ["Doe, Jane"],
+    year: 2024,
+    journal: "J & R",
+    volume: "2",
+    issue: "1",
+    pages: "4-8",
+    doi: "10.1000/x"
+  }]);
+  assert.match(bibtex, /@article\{stable-key/);
+  assert.match(bibtex, /title = \{A \\{Study\\\} \\& More\}/);
+  assert.match(bibtex, /volume = \{2\}/);
+  assert.match(bibtex, /number = \{1\}/);
+});
+
+test("new exporters keep one record per selected paper", () => {
+  const papers = [{ citationKey: "one", title: "One", authors: ["Doe, Jane"], year: 2024, publicationType: "article" }];
+  assert.equal((exportRis(papers).match(/^TY  - /gm) || []).length, 1);
+  assert.match(exportRis(papers), /ID  - one/);
+  assert.equal(JSON.parse(exportCslJson(papers)).length, 1);
 });
 

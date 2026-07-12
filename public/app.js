@@ -35,6 +35,7 @@ const state = {
   currentView: "library",
   selectedDraft: null,
   selectedPaper: null,
+  selectedPaperIds: new Set(),
   notesDirty: false,
   noteAutosaveTimer: null,
   noteSaveRequestId: 0,
@@ -80,6 +81,11 @@ const fields = {
   year: document.querySelector("#yearField"),
   doi: document.querySelector("#doiField"),
   journal: document.querySelector("#journalField"),
+  volume: document.querySelector("#volumeField"),
+  issue: document.querySelector("#issueField"),
+  pages: document.querySelector("#pagesField"),
+  publisher: document.querySelector("#publisherField"),
+  publicationType: document.querySelector("#publicationTypeField"),
   abstract: document.querySelector("#abstractField"),
   keywords: document.querySelector("#keywordsField"),
   themes: document.querySelector("#themesField"),
@@ -111,6 +117,20 @@ const trashElements = {
   message: document.querySelector("#trashPaperDialogMessage"),
   cancel: document.querySelector("#trashPaperDialogCancel"),
   confirm: document.querySelector("#trashPaperDialogConfirm")
+};
+
+const citationElements = {
+  key: document.querySelector("#citationKeyField"),
+  status: document.querySelector("#citationStatusField"),
+  missing: document.querySelector("#citationMissingFields"),
+  verify: document.querySelector("#verifyCitationButton"),
+  regenerate: document.querySelector("#regenerateCitationButton"),
+  copyInText: document.querySelector("#copyInTextCitationButton"),
+  copyBibliography: document.querySelector("#copyBibliographyButton"),
+  exportMenu: document.querySelector("#citationExportMenu"),
+  exportFormat: document.querySelector("#citationExportFormat"),
+  exportSelected: document.querySelector("#exportSelectedCitations"),
+  selectionStatus: document.querySelector("#citationSelectionStatus")
 };
 
 const detailEditableControls = Array.from(
@@ -750,7 +770,7 @@ function updateTrashPaperButton() {
 }
 
 function chip(label, className = "") {
-  return `<span class="chip ${className}">${label}</span>`;
+  return `<span class="chip ${className}">${escapeHtml(label)}</span>`;
 }
 
 function appendSafeHighlightedText(container, value, terms = []) {
@@ -858,7 +878,11 @@ function renderPapers() {
     return;
   }
   const container = document.querySelector("#paperList");
+  state.selectedPaperIds = new Set(
+    [...state.selectedPaperIds].filter((id) => state.papers.some((paper) => paper.id === id))
+  );
   document.querySelector("#paperCount").textContent = String(state.papers.length);
+  renderCitationSelectionStatus();
   if (state.papers.length === 0) {
     container.innerHTML = `<div class="empty-state">暂无已入库论文</div>`;
     return;
@@ -875,19 +899,26 @@ function renderPapers() {
       const meta = [(paper.authors || []).join(", "), paper.year, paper.journal].filter(Boolean).join(" · ");
       return `
         <article class="paper-item${selected}" data-paper-id="${paper.id}">
+          <input class="paper-select-checkbox" type="checkbox" aria-label="选择引用" data-paper-id="${paper.id}" ${state.selectedPaperIds.has(paper.id) ? "checked" : ""} />
           <div class="paper-card-main">
-            <h3 class="paper-title">${paper.title || "未命名论文"}</h3>
-            <div class="paper-meta">${meta || "未填写作者或来源"}</div>
+            <h3 class="paper-title">${escapeHtml(paper.title || "未命名论文")}</h3>
+            <div class="paper-meta">${escapeHtml(meta || "未填写作者或来源")}</div>
           </div>
           <div class="chip-row paper-taxonomy">${chips}</div>
           <div class="paper-card-footer">
-            <span>${paper.readingStatus || "to-read"}</span>
+            <span>${escapeHtml(paper.readingStatus || "to-read")}</span>
             <span>打开原文</span>
           </div>
         </article>
       `;
     })
     .join("");
+}
+
+function renderCitationSelectionStatus() {
+  if (!citationElements.selectionStatus) return;
+  const count = state.selectedPaperIds.size;
+  citationElements.selectionStatus.textContent = count ? `已选择 ${count} 篇引用` : "未选择引用";
 }
 
 function renderTrash() {
@@ -1070,6 +1101,16 @@ function fillFormFromPaper(paper) {
   fields.year.value = paper.year || "";
   fields.doi.value = paper.doi || "";
   fields.journal.value = paper.journal || "";
+  fields.volume.value = paper.volume || "";
+  fields.issue.value = paper.issue || "";
+  fields.pages.value = paper.pages || "";
+  fields.publisher.value = paper.publisher || "";
+  fields.publicationType.value = paper.publicationType || "article";
+  citationElements.key.value = paper.citationKey || "";
+  citationElements.status.value = paper.citationStatus || "unverified";
+  citationElements.missing.textContent = paper.citationMissingFields?.length
+    ? `缺少：${paper.citationMissingFields.join("、")}`
+    : "字段完整";
   fields.abstract.value = paper.abstract || "";
   fields.keywords.value = joinList(paper.keywords);
   fields.themes.value = joinList(paper.themes);
@@ -1103,6 +1144,9 @@ function clearPaperSelection() {
     field.value = "";
   }
   fields.readingStatus.value = "to-read";
+  citationElements.key.value = "";
+  citationElements.status.value = "unverified";
+  citationElements.missing.textContent = "";
   document.querySelector("#detailTitle").textContent = "详情";
   document.querySelector("#detailMode").textContent = "未选择";
   document.querySelector("#draftDuplicateWarning").hidden = true;
@@ -1798,6 +1842,11 @@ function metadataPayload() {
     year: fields.year.value ? Number(fields.year.value) : null,
     doi: fields.doi.value.trim(),
     journal: fields.journal.value.trim(),
+    volume: fields.volume.value.trim(),
+    issue: fields.issue.value.trim(),
+    pages: fields.pages.value.trim(),
+    publisher: fields.publisher.value.trim(),
+    publicationType: fields.publicationType.value,
     abstract: fields.abstract.value.trim(),
     keywords: splitList(fields.keywords.value),
     themes: splitList(fields.themes.value),
@@ -2025,6 +2074,15 @@ document.querySelector("#draftList").addEventListener("click", (event) => {
 });
 
 document.querySelector("#paperList").addEventListener("click", async (event) => {
+  const checkbox = event.target.closest(".paper-select-checkbox");
+  if (checkbox) {
+    event.stopPropagation();
+    const paperId = Number(checkbox.dataset.paperId);
+    if (checkbox.checked) state.selectedPaperIds.add(paperId);
+    else state.selectedPaperIds.delete(paperId);
+    renderCitationSelectionStatus();
+    return;
+  }
   const item = event.target.closest("[data-paper-id]");
   if (!item) return;
   const hit = state.searchResults?.find((entry) => entry.paperId === Number(item.dataset.paperId));
@@ -2050,6 +2108,13 @@ document.querySelector("#paperList").addEventListener("click", async (event) => 
   fillFormFromPaper(paper);
   await openPaperReader(paper);
 });
+
+citationElements.verify.addEventListener("click", () => void saveCitation({ status: "verified" }));
+citationElements.regenerate.addEventListener("click", () => void saveCitation({ regenerate: true }));
+citationElements.status.addEventListener("change", (event) => void saveCitation({ status: event.target.value }));
+citationElements.copyInText.addEventListener("click", () => void copyCitation("in-text-apa"));
+citationElements.copyBibliography.addEventListener("click", () => void copyCitation("gbt7714"));
+citationElements.exportSelected.addEventListener("click", () => void exportSelectedCitations());
 
 document.querySelector("#backToListButton").addEventListener("click", async () => {
   await closeReaderAndShowList();
@@ -2159,6 +2224,67 @@ readerElements.researchCardList.addEventListener("click", async (event) => {
 });
 
 readerElements.viewer.addEventListener("scroll", updateCurrentPageFromScroll);
+
+async function saveCitation({ status = citationElements.status.value, regenerate = false } = {}) {
+  if (!state.selectedPaper || fields.draftId.value) return null;
+  try {
+    const paper = await api(`/api/papers/${state.selectedPaper.id}/citation`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        expectedVersion: state.selectedPaper.version,
+        citationKey: citationElements.key.value.trim(),
+        status,
+        regenerate
+      })
+    });
+    patchPaperInState(paper);
+    renderPapers();
+    fillFormFromPaper(paper);
+    setStatus("引用状态已保存");
+    return paper;
+  } catch (error) {
+    setStatus(error.message);
+    return null;
+  }
+}
+
+async function copyCitation(format) {
+  if (!state.selectedPaper) return;
+  try {
+    const response = await fetch(`/api/citations/export?format=${encodeURIComponent(format)}&ids=${state.selectedPaper.id}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const text = await response.text();
+    if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
+    await navigator.clipboard.writeText(text);
+    setStatus("引用已复制");
+  } catch {
+    setStatus("Clipboard 复制失败，请手动复制");
+  }
+}
+
+async function exportSelectedCitations() {
+  const ids = [...state.selectedPaperIds];
+  if (!ids.length) {
+    setStatus("请先选择论文引用");
+    return;
+  }
+  try {
+    const format = citationElements.exportFormat.value;
+    const response = await fetch(`/api/citations/export?format=${encodeURIComponent(format)}&ids=${ids.join(",")}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `citations-${format}.txt`;
+    link.click();
+    URL.revokeObjectURL(url);
+    setStatus("引用导出已生成");
+  } catch (error) {
+    setStatus(error.message);
+  }
+}
 
 document.querySelector("#detailForm").addEventListener("submit", async (event) => {
   event.preventDefault();

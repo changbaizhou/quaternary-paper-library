@@ -1525,6 +1525,62 @@ test("API translation maps provider failures to a clear error", async () => {
   );
 });
 
+test("citation API preserves keys, validates status, and exports ids in request order", async () => {
+  await withServer(async (baseUrl, { dbPath }) => {
+    const repo = new PaperRepository(dbPath);
+    const create = (title, year) => repo.confirmDraft(repo.createDraft({
+      title,
+      authors: ["Doe, Jane"],
+      year,
+      journal: "Journal",
+      classification: {},
+      confidence: {},
+      evidence: {}
+    }));
+    const firstId = create("First", 2020);
+    const secondId = create("Second", 2021);
+
+    const first = (await (await fetch(`${baseUrl}/api/papers`)).json()).find((paper) => paper.id === firstId);
+    assert.equal(first.citationKey, "doe2020first");
+    const metadata = await fetch(`${baseUrl}/api/papers/${firstId}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expectedVersion: first.version, volume: "7", issue: "2", pages: "10-20", publisher: "P", publicationType: "article" })
+    });
+    assert.equal(metadata.status, 200);
+    const changed = await metadata.json();
+    assert.equal(changed.citationKey, first.citationKey);
+    assert.equal(changed.volume, "7");
+
+    const verified = await fetch(`${baseUrl}/api/papers/${firstId}/citation`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expectedVersion: changed.version, status: "verified", citationKey: "stable-first" })
+    });
+    assert.equal(verified.status, 200);
+    const verifiedPaper = await verified.json();
+    assert.equal(verifiedPaper.citationKey, "stable-first");
+    assert.equal(verifiedPaper.citationStatus, "verified");
+
+    const exported = await fetch(`${baseUrl}/api/citations/export?format=in-text-apa&ids=${secondId},${firstId}`);
+    assert.equal(exported.status, 200);
+    assert.match(exported.headers.get("content-type"), /text\/plain/);
+    assert.match(exported.headers.get("content-disposition"), /citations-in-text-apa\.txt/);
+    const body = await exported.text();
+    assert.ok(body.indexOf("Doe, 2021") < body.indexOf("Doe, 2020"));
+
+    assert.equal((await fetch(`${baseUrl}/api/citations/export?format=apa7`)).status, 400);
+    assert.equal((await fetch(`${baseUrl}/api/citations/export?format=apa7&ids=9999`)).status, 404);
+    await fetch(`${baseUrl}/api/papers/${secondId}`, { method: "DELETE" });
+    assert.equal((await fetch(`${baseUrl}/api/citations/export?format=apa7&ids=${secondId}`)).status, 400);
+    assert.equal((await fetch(`${baseUrl}/api/papers/nope/citation`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expectedVersion: 1, status: "unverified" })
+    })).status, 400);
+  });
+});
+
 test("annotation and research-card API enforces page, confirmation, version, and public shape", async () => {
   await withServer(async (baseUrl, { dbPath }) => {
     const repo = new PaperRepository(dbPath);
