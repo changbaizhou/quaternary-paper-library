@@ -17,7 +17,7 @@ import {
 import { initDb } from "./database.js";
 import { exportBibtex, exportCsv, exportMarkdown } from "./exporters.js";
 import { lookupDoiMetadata, lookupTitleMetadata } from "./metadata.js";
-import { extractOcrText as defaultExtractOcrText } from "./ocr.js";
+import { extractOcrPages as defaultExtractOcrPages, extractOcrText as defaultExtractOcrText } from "./ocr.js";
 import { metadataFields, noteFields } from "./paperData.js";
 import { fingerprintBuffer } from "./duplicates.js";
 import { removeLibraryFiles, resolveLibraryPdf } from "./fileStorage.js";
@@ -35,6 +35,7 @@ import {
   parseKeywords,
   parseYear
 } from "./pdfExtract.js";
+import { extractPdfPages as defaultExtractPdfPages, indexPaperSource } from "./pageText.js";
 import {
   PaperNotFoundError,
   PaperRepository,
@@ -340,6 +341,43 @@ function publicPaper(paper) {
   };
 }
 
+export function createPaperIndexService({
+  repo,
+  filesDir,
+  extractPdfPages = defaultExtractPdfPages,
+  extractOcrPages = defaultExtractOcrPages,
+  ocr = {}
+}) {
+  return async (paperId) => {
+    const paper = repo.getPaper(Number(paperId));
+    if (!paper) throw new PaperNotFoundError();
+    if (paper.deletedAt !== null || paper.mergedIntoId !== null) {
+      throw new PaperStateError("Paper must be active before indexing");
+    }
+    const pdfPath = resolveLibraryPdf(filesDir, paper.storedPath);
+    if (!pdfPath || !existsSync(pdfPath)) {
+      return { indexState: "no-source", pageCount: 0, sources: { pdf: 0, ocr: 0, mixed: 0 } };
+    }
+
+    try {
+      const summary = await indexPaperSource({
+        paperId: paper.id,
+        pdfPath,
+        repo,
+        extractPdfPages,
+        extractOcrPages,
+        ocr
+      });
+      return { indexState: "indexed", ...summary };
+    } catch {
+      const error = new Error("Page text extraction failed");
+      error.status = 422;
+      error.code = "PAPER_INDEX_FAILED";
+      throw error;
+    }
+  };
+}
+
 function publicTrashPaper(paper) {
   return {
     id: paper.id,
@@ -444,6 +482,13 @@ export function createApp(options = {}) {
   mkdirSync(config.backupsDir, { recursive: true });
   initDb(config.dbPath, { backupsDir: config.backupsDir });
   const repo = new PaperRepository(config.dbPath);
+  const indexPaper = createPaperIndexService({
+    repo,
+    filesDir: config.filesDir,
+    extractPdfPages: config.extractPdfPages,
+    extractOcrPages: config.extractOcrPages,
+    ocr: config.ocr
+  });
   if (config.automaticBackupsEnabled ?? true) scheduleAutomaticBackup(repo, config, now);
   const app = express();
 
@@ -595,12 +640,47 @@ export function createApp(options = {}) {
     }
   });
 
-  app.post("/api/drafts/:id/confirm", (request, response, next) => {
+  app.post("/api/drafts/:id/confirm", async (request, response, next) => {
     try {
       const paperId = repo.confirmDraft(Number(request.params.id), request.body || {});
-      response.status(201).json(publicPaper(repo.getPaper(paperId)));
+      let indexResult;
+      try {
+        indexResult = await indexPaper(paperId);
+      } catch {
+        indexResult = { indexState: "failed", error: "indexing failed" };
+      }
+      response.status(201).json({ ...publicPaper(repo.getPaper(paperId)), ...indexResult });
     } catch (error) {
       respondToPaperStateError(error, response, next);
+    }
+  });
+
+  app.post("/api/papers/:id/reindex", async (request, response, next) => {
+    try {
+      if (request.body?.confirm !== true) {
+        response.status(400).json({ error: "Reindex confirmation is required" });
+        return;
+      }
+      const result = await indexPaper(Number(request.params.id));
+      if (result.indexState === "no-source") {
+        response.status(404).json({ error: "Source PDF not found", ...result });
+        return;
+      }
+      response.status(200).json(result);
+    } catch (error) {
+      if (error instanceof PaperNotFoundError) {
+        response.status(404).json({ error: "Paper not found" });
+        return;
+      }
+      if (error instanceof PaperStateError) {
+        response.status(409).json({ error: error.message });
+        return;
+      }
+      if (error.code === "PAPER_INDEX_FAILED") {
+        response.status(422).json({ error: error.message, indexState: "failed" });
+        return;
+      }
+      next(error);
     }
   });
 

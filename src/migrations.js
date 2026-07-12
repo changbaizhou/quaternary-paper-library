@@ -147,6 +147,61 @@ const migrations = [
         update.run(normalizeDoi(paper.doi), normalizeTitle(paper.title), paper.id);
       }
     }
+  },
+  {
+    version: 3,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS paper_pages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          paper_id INTEGER NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+          page_number INTEGER NOT NULL CHECK (page_number > 0),
+          text TEXT NOT NULL DEFAULT '',
+          text_source TEXT NOT NULL CHECK (text_source IN ('pdf', 'ocr', 'mixed')),
+          language TEXT NOT NULL DEFAULT '',
+          character_count INTEGER NOT NULL DEFAULT 0 CHECK (character_count >= 0),
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE (paper_id, page_number)
+        );
+        CREATE INDEX IF NOT EXISTS idx_paper_pages_paper_page
+          ON paper_pages (paper_id, page_number);
+        CREATE INDEX IF NOT EXISTS idx_paper_pages_page_number
+          ON paper_pages (page_number);
+      `);
+
+      try {
+        db.exec(`
+          CREATE VIRTUAL TABLE IF NOT EXISTS paper_pages_fts
+          USING fts5(text, content='paper_pages', content_rowid='id');
+        `);
+      } catch (error) {
+        throw new Error("SQLite FTS5 is required for paper page indexing", { cause: error });
+      }
+
+      db.exec(`
+        CREATE TRIGGER IF NOT EXISTS paper_pages_ai
+        AFTER INSERT ON paper_pages
+        BEGIN
+          INSERT INTO paper_pages_fts (rowid, text) VALUES (new.id, new.text);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS paper_pages_au
+        AFTER UPDATE OF text, text_source, language, character_count, updated_at ON paper_pages
+        BEGIN
+          INSERT INTO paper_pages_fts (paper_pages_fts, rowid, text)
+          VALUES ('delete', old.id, old.text);
+          INSERT INTO paper_pages_fts (rowid, text) VALUES (new.id, new.text);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS paper_pages_ad
+        AFTER DELETE ON paper_pages
+        BEGIN
+          INSERT INTO paper_pages_fts (paper_pages_fts, rowid, text)
+          VALUES ('delete', old.id, old.text);
+        END;
+      `);
+    }
   }
 ];
 

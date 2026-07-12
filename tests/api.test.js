@@ -1524,3 +1524,136 @@ test("API translation maps provider failures to a clear error", async () => {
     }
   );
 });
+
+test("API reindex requires confirmation and reports indexed page sources", async () => {
+  await withServer(
+    async (baseUrl, { dbPath, filesDir, dir }) => {
+      await mkdir(path.join(filesDir, "2026"), { recursive: true });
+      await writeFile(path.join(filesDir, "2026", "source.pdf"), "generated test fixture");
+      const repo = new PaperRepository(dbPath);
+      const draftId = repo.createDraft({
+        storedFilename: "source.pdf",
+        storedPath: "2026/source.pdf",
+        title: "Reindex API paper",
+        classification: {}
+      });
+      const paperId = repo.confirmDraft(draftId);
+
+      const missingConfirmation = await fetch(`${baseUrl}/api/papers/${paperId}/reindex`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({})
+      });
+      assert.equal(missingConfirmation.status, 400);
+
+      const missingPaper = await fetch(`${baseUrl}/api/papers/999999/reindex`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ confirm: true })
+      });
+      assert.equal(missingPaper.status, 404);
+
+      const indexed = await fetch(`${baseUrl}/api/papers/${paperId}/reindex`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ confirm: true })
+      });
+      assert.equal(indexed.status, 200);
+      const body = await indexed.json();
+      assert.equal(body.pageCount, 2);
+      assert.deepEqual(body.sources, { pdf: 1, ocr: 1, mixed: 0 });
+      assert.equal(JSON.stringify(body).includes(dir), false);
+    },
+    {
+      extractPdfPages: async () => [
+        { pageNumber: 1, text: "complete PDF page", source: "pdf", language: "" },
+        { pageNumber: 2, text: "short", source: "pdf", language: "" }
+      ],
+      extractOcrPages: async () => [
+        { pageNumber: 2, text: "OCR supplements page two", source: "ocr", language: "eng" }
+      ]
+    }
+  );
+});
+
+test("API reindex rejects inactive or source-less papers and preserves old pages on extraction failure", async () => {
+  await withServer(
+    async (baseUrl, { dbPath, filesDir }) => {
+      const repo = new PaperRepository(dbPath);
+      const createPaper = (input = {}) => repo.confirmDraft(repo.createDraft({ title: "API state paper", classification: {}, ...input }));
+      const noSourceId = createPaper();
+      const noSourceResponse = await fetch(`${baseUrl}/api/papers/${noSourceId}/reindex`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ confirm: true })
+      });
+      assert.equal(noSourceResponse.status, 404);
+
+      const trashedId = createPaper({ storedPath: "missing.pdf" });
+      repo.replacePaperPages(trashedId, [{ pageNumber: 1, text: "old page", source: "pdf", language: "" }]);
+      repo.trashPaper(trashedId);
+      const trashedResponse = await fetch(`${baseUrl}/api/papers/${trashedId}/reindex`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ confirm: true })
+      });
+      assert.equal(trashedResponse.status, 409);
+
+      const mergedId = createPaper({ storedPath: "missing.pdf" });
+      const db = openDb(dbPath);
+      try {
+        db.prepare("UPDATE papers SET deleted_at = CURRENT_TIMESTAMP, merged_into_id = 999 WHERE id = ?").run(mergedId);
+      } finally {
+        db.close();
+      }
+      const mergedResponse = await fetch(`${baseUrl}/api/papers/${mergedId}/reindex`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ confirm: true })
+      });
+      assert.equal(mergedResponse.status, 409);
+
+      await mkdir(path.join(filesDir, "2026"), { recursive: true });
+      await writeFile(path.join(filesDir, "2026", "failing.pdf"), "generated test fixture");
+      const failedId = createPaper({ storedPath: "2026/failing.pdf" });
+      repo.replacePaperPages(failedId, [{ pageNumber: 1, text: "keep this page", source: "pdf", language: "" }]);
+      const failedResponse = await fetch(`${baseUrl}/api/papers/${failedId}/reindex`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ confirm: true })
+      });
+      assert.equal(failedResponse.status, 422);
+      assert.match((await failedResponse.json()).error, /extraction failed/i);
+      assert.deepEqual(repo.listPaperPages(failedId).map((page) => page.text), ["keep this page"]);
+    },
+    { extractPdfPages: async () => { throw new Error("private source path leaked"); } }
+  );
+});
+
+test("confirming a draft indexes a safe source when available but does not roll back confirmation", async () => {
+  await withServer(
+    async (baseUrl, { dbPath, filesDir }) => {
+      await mkdir(path.join(filesDir, "2026"), { recursive: true });
+      await writeFile(path.join(filesDir, "2026", "confirm.pdf"), "generated test fixture");
+      const repo = new PaperRepository(dbPath);
+      const draftId = repo.createDraft({
+        storedFilename: "confirm.pdf",
+        storedPath: "2026/confirm.pdf",
+        title: "Confirm source paper",
+        classification: {}
+      });
+      const response = await fetch(`${baseUrl}/api/drafts/${draftId}/confirm`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({})
+      });
+      assert.equal(response.status, 201);
+      const body = await response.json();
+      assert.equal(body.indexState, "failed");
+      assert.equal(body.error, "indexing failed");
+      assert.equal(repo.getDraft(draftId).status, "confirmed");
+      assert.equal(JSON.stringify(body).includes(filesDir), false);
+    },
+    { extractPdfPages: async () => { throw new Error("private source path"); } }
+  );
+});

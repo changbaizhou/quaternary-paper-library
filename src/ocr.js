@@ -104,10 +104,10 @@ export async function commandExists(command, options = {}) {
   }
 }
 
-export async function extractOcrText(pdfPath, options = {}) {
+export async function extractOcrPages(pdfPath, options = {}) {
   const enabled = options.enabled ?? process.env.QPL_OCR_ENABLED !== "0";
   if (!enabled) {
-    return { used: false, text: "", reason: "disabled", missingTools: [], pages: 0 };
+    return { used: false, reason: "disabled", missingTools: [], pages: [] };
   }
 
   const pdfRenderer = options.pdfRenderer || process.env.QPL_PDFTOPPM_BIN || "pdftoppm";
@@ -119,7 +119,7 @@ export async function extractOcrText(pdfPath, options = {}) {
   if (!(await exists(pdfRenderer))) missingTools.push(pdfRenderer);
   if (!(await exists(tesseract))) missingTools.push(tesseract);
   if (missingTools.length) {
-    return { used: false, text: "", reason: "missing-tools", missingTools, pages: 0 };
+    return { used: false, reason: "missing-tools", missingTools: missingTools.map((tool) => path.basename(tool)), pages: [] };
   }
 
   const pages = toPositiveInteger(options.pages ?? process.env.QPL_OCR_PAGES, DEFAULT_PAGES);
@@ -147,34 +147,51 @@ export async function extractOcrText(pdfPath, options = {}) {
       .sort(sortPageImages);
 
     if (!imageNames.length) {
-      return { used: false, text: "", reason: "no-pages", missingTools: [], pages: 0 };
+      return { used: false, reason: "no-pages", missingTools: [], pages: [] };
     }
 
-    const chunks = [];
+    const pageResults = [];
     for (const imageName of imageNames) {
       const imagePath = path.join(workDir, imageName);
       const result = await runner(tesseract, [imagePath, "stdout", "-l", lang, "--psm", "6"]);
-      chunks.push(result.stdout);
+      pageResults.push({
+        pageNumber: Number(imageName.match(/-(\d+)\.png$/i)?.[1]),
+        text: normalizeOcrText(result.stdout),
+        source: "ocr",
+        language: lang
+      });
     }
 
-    const text = normalizeOcrText(chunks.join("\n"));
-    return {
-      used: true,
-      text,
-      reason: text ? "" : "empty-text",
-      missingTools: [],
-      pages: imageNames.length
-    };
-  } catch (error) {
+    return pageResults;
+  } catch {
     return {
       used: false,
-      text: "",
       reason: "failed",
-      error: error.message,
       missingTools: [],
-      pages: 0
+      pages: []
     };
   } finally {
     await rm(workDir, { recursive: true, force: true });
   }
+}
+
+export async function extractOcrText(pdfPath, options = {}) {
+  const result = await extractOcrPages(pdfPath, options);
+  if (!Array.isArray(result)) {
+    return {
+      used: false,
+      text: "",
+      reason: result.reason,
+      missingTools: result.missingTools || [],
+      pages: result.pages?.length || 0
+    };
+  }
+  const text = normalizeOcrText(result.map((page) => page.text).join("\n"));
+  return {
+    used: true,
+    text,
+    reason: text ? "" : "empty-text",
+    missingTools: [],
+    pages: result.length
+  };
 }

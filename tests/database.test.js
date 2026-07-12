@@ -73,7 +73,95 @@ test("initDb creates a missing nested database parent before locking", async () 
     const db = openDb(dbPath);
     const versions = db.prepare("SELECT version FROM schema_migrations").all();
     db.close();
-    assert.deepEqual(versions.map((item) => item.version), [1, 2]);
+    assert.deepEqual(versions.map((item) => item.version), [1, 2, 3]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("migration v3 creates page text schema, indexes, and FTS triggers without changing legacy fields", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-page-schema-"));
+  const dbPath = path.join(dir, "library.sqlite");
+  try {
+    initDb(dbPath);
+    const db = openDb(dbPath);
+    try {
+      const columns = db.prepare("PRAGMA table_info(paper_pages)").all();
+      assert.deepEqual(columns.map((column) => column.name), [
+        "id", "paper_id", "page_number", "text", "text_source", "language",
+        "character_count", "created_at", "updated_at"
+      ]);
+      assert.equal(columns.find((column) => column.name === "paper_id").notnull, 1);
+      assert.equal(columns.find((column) => column.name === "page_number").notnull, 1);
+      const objects = db.prepare(`
+        SELECT type, name FROM sqlite_master
+        WHERE name IN (
+          'paper_pages_fts', 'paper_pages_ai', 'paper_pages_au', 'paper_pages_ad',
+          'idx_paper_pages_paper_page', 'idx_paper_pages_page_number'
+        )
+        ORDER BY type, name
+      `).all().map(({ type, name }) => ({ type, name }));
+      assert.deepEqual(objects, [
+        { type: "index", name: "idx_paper_pages_page_number" },
+        { type: "index", name: "idx_paper_pages_paper_page" },
+        { type: "table", name: "paper_pages_fts" },
+        { type: "trigger", name: "paper_pages_ad" },
+        { type: "trigger", name: "paper_pages_ai" },
+        { type: "trigger", name: "paper_pages_au" }
+      ]);
+      const papersBefore = db.prepare("PRAGMA table_info(papers)").all().map((column) => column.name);
+      const draftsBefore = db.prepare("PRAGMA table_info(drafts)").all().map((column) => column.name);
+      db.prepare("INSERT INTO papers (title) VALUES (?)").run("FTS paper");
+      const paperId = Number(db.prepare("SELECT last_insert_rowid() AS id").get().id);
+      db.prepare("INSERT INTO paper_pages (paper_id, page_number, text, text_source, language, character_count) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(paperId, 1, "alpha searchable", "pdf", "", 16);
+      assert.equal(db.prepare("SELECT rowid FROM paper_pages_fts WHERE paper_pages_fts MATCH 'alpha'").all().length, 1);
+      db.prepare("UPDATE paper_pages SET text = ?, character_count = ? WHERE paper_id = ? AND page_number = ?")
+        .run("beta searchable", 15, paperId, 1);
+      assert.equal(db.prepare("SELECT rowid FROM paper_pages_fts WHERE paper_pages_fts MATCH 'alpha'").all().length, 0);
+      assert.equal(db.prepare("SELECT rowid FROM paper_pages_fts WHERE paper_pages_fts MATCH 'beta'").all().length, 1);
+      db.prepare("DELETE FROM paper_pages WHERE paper_id = ? AND page_number = ?").run(paperId, 1);
+      assert.equal(db.prepare("SELECT rowid FROM paper_pages_fts WHERE paper_pages_fts MATCH 'beta'").all().length, 0);
+      assert.deepEqual(db.prepare("PRAGMA table_info(papers)").all().map((column) => column.name), papersBefore);
+      assert.deepEqual(db.prepare("PRAGMA table_info(drafts)").all().map((column) => column.name), draftsBefore);
+    } finally {
+      db.close();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("migration v3 rolls back all page schema changes when version recording fails", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-page-schema-rollback-"));
+  const dbPath = path.join(dir, "library.sqlite");
+  try {
+    const legacy = openDb(dbPath);
+    legacy.exec(`
+      CREATE TABLE papers (id INTEGER PRIMARY KEY, title TEXT NOT NULL DEFAULT '');
+      CREATE TABLE drafts (id INTEGER PRIMARY KEY, status TEXT NOT NULL DEFAULT 'pending');
+      CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+      INSERT INTO schema_migrations (version) VALUES (1), (2);
+      CREATE TRIGGER reject_v3
+      BEFORE INSERT ON schema_migrations
+      WHEN NEW.version = 3
+      BEGIN
+        SELECT RAISE(ABORT, 'injected v3 failure');
+      END;
+    `);
+    legacy.close();
+
+    assert.throws(() => initDb(dbPath), /injected v3 failure/);
+    const failed = openDb(dbPath);
+    try {
+      assert.deepEqual(
+        failed.prepare("SELECT version FROM schema_migrations ORDER BY version").all().map(({ version }) => ({ version })),
+        [{ version: 1 }, { version: 2 }]
+      );
+      assert.equal(failed.prepare("SELECT 1 FROM sqlite_master WHERE name = 'paper_pages'").get(), undefined);
+    } finally {
+      failed.close();
+    }
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -149,7 +237,7 @@ test("initDb waits for an existing proper-lockfile lock", async () => {
     const migrated = openDb(dbPath);
     const versions = migrated.prepare("SELECT version FROM schema_migrations").all();
     migrated.close();
-    assert.deepEqual(versions.map((item) => item.version), [1, 2]);
+    assert.deepEqual(versions.map((item) => item.version), [1, 2, 3]);
   } finally {
     release?.();
     await rm(dir, { recursive: true, force: true });
@@ -186,7 +274,7 @@ test("lock worker cleans up after acquisition failure", async () => {
     const migrated = openDb(dbPath);
     const versions = migrated.prepare("SELECT version FROM schema_migrations").all();
     migrated.close();
-    assert.deepEqual(versions.map((item) => item.version), [1, 2]);
+    assert.deepEqual(versions.map((item) => item.version), [1, 2, 3]);
   } finally {
     release?.();
     await rm(dir, { recursive: true, force: true });
@@ -220,7 +308,7 @@ test("lock worker times out acquisition and leaves no owned lock", async () => {
     const migrated = openDb(dbPath);
     const versions = migrated.prepare("SELECT version FROM schema_migrations").all();
     migrated.close();
-    assert.deepEqual(versions.map((item) => item.version), [1, 2]);
+    assert.deepEqual(versions.map((item) => item.version), [1, 2, 3]);
   } finally {
     release?.();
     await rm(dir, { recursive: true, force: true });
@@ -263,7 +351,7 @@ test("compromised worker lock fails safely and permits retry", async () => {
     const migrated = openDb(dbPath);
     const versions = migrated.prepare("SELECT version FROM schema_migrations").all();
     migrated.close();
-    assert.deepEqual(versions.map((item) => item.version), [1, 2]);
+    assert.deepEqual(versions.map((item) => item.version), [1, 2, 3]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -291,7 +379,7 @@ test("initDb reclaims a stale proper-lockfile lock", async () => {
     const migrated = openDb(dbPath);
     const versions = migrated.prepare("SELECT version FROM schema_migrations").all();
     migrated.close();
-    assert.deepEqual(versions.map((item) => item.version), [1, 2]);
+    assert.deepEqual(versions.map((item) => item.version), [1, 2, 3]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -328,7 +416,7 @@ test("initDb runs versioned migrations without losing existing papers", async ()
       after.close();
     }
 
-    assert.deepEqual(migrations.map((item) => item.version), [1, 2]);
+    assert.deepEqual(migrations.map((item) => item.version), [1, 2, 3]);
     assert.ok(columns.includes("normalized_doi"));
     assert.ok(columns.includes("normalized_title"));
     assert.ok(columns.includes("file_sha256"));
@@ -414,7 +502,7 @@ test("initDb snapshots and fully migrates pre-v1 file records exactly once", asy
     const migratedPaper = migrated.prepare("SELECT title, version FROM papers").get();
     migrated.close();
 
-    assert.deepEqual(versions.map((item) => item.version), [1, 2]);
+    assert.deepEqual(versions.map((item) => item.version), [1, 2, 3]);
     for (const column of ["normalized_doi", "normalized_title", "file_sha256", "version", "deleted_at", "merged_into_id"]) {
       assert.ok(paperColumns.includes(column), `missing papers.${column}`);
     }
@@ -525,7 +613,7 @@ test("initDb rolls back migration failure, releases its lock, and retries", asyn
     const retriedColumns = retried.prepare("PRAGMA table_info(papers)").all().map((item) => item.name);
     retried.close();
 
-    assert.deepEqual(retriedVersions.map((item) => item.version), [1, 2]);
+    assert.deepEqual(retriedVersions.map((item) => item.version), [1, 2, 3]);
     assert.ok(retriedColumns.includes("normalized_doi"));
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -568,7 +656,7 @@ test("initDb serializes concurrent initialization across processes", async () =>
     db.close();
 
     assert.equal(snapshots.length, 1);
-    assert.deepEqual(versions.map((item) => item.version), [1, 2]);
+    assert.deepEqual(versions.map((item) => item.version), [1, 2, 3]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -611,7 +699,7 @@ test("initDb remains serialized across repeated concurrent initialization rounds
       migrated.close();
 
       assert.equal(snapshots.length, 1);
-      assert.deepEqual(versions.map((item) => item.version), [1, 2]);
+      assert.deepEqual(versions.map((item) => item.version), [1, 2, 3]);
     }
   } finally {
     await rm(dir, { recursive: true, force: true });

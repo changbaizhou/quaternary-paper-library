@@ -130,6 +130,21 @@ function mapPaper(row) {
   };
 }
 
+function mapPaperPage(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    paperId: row.paper_id,
+    pageNumber: row.page_number,
+    text: row.text,
+    source: row.text_source,
+    language: row.language,
+    characterCount: row.character_count,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
 function mapBackup(row) {
   if (!row) return null;
   return {
@@ -185,6 +200,12 @@ function normalizePageNumber(value) {
 
 function mergeUnique(...lists) {
   return [...new Set(lists.flat().filter(Boolean))];
+}
+
+function summarizePages(pages) {
+  const sources = { pdf: 0, ocr: 0, mixed: 0 };
+  for (const page of pages) sources[page.source] += 1;
+  return { pageCount: pages.length, sources };
 }
 
 function mergeDecisionSummary(target, source, merged) {
@@ -992,6 +1013,91 @@ export class PaperRepository {
 
   getPaper(id) {
     return this.withDb((db) => mapPaper(db.prepare("SELECT * FROM papers WHERE id = ?").get(id)));
+  }
+
+  replacePaperPages(paperId, pages) {
+    return this.withDb((db) => {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const id = numericId(paperId, "paperId");
+        if (!Array.isArray(pages) || pages.length === 0) {
+          throw new RangeError("Paper pages cannot be empty");
+        }
+        const paper = db.prepare("SELECT deleted_at, merged_into_id FROM papers WHERE id = ?").get(id);
+        if (!paper) throw new PaperNotFoundError();
+        if (paper.deleted_at !== null || paper.merged_into_id !== null) {
+          throw new PaperStateError("Paper must be active before replacing pages");
+        }
+
+        const normalized = pages.map((page) => {
+          const pageNumber = normalizePageNumber(page?.pageNumber);
+          const source = String(page?.source || "");
+          if (!["pdf", "ocr", "mixed"].includes(source)) {
+            throw new TypeError("Page source must be pdf, ocr, or mixed");
+          }
+          const text = String(page?.text || "");
+          const language = String(page?.language || "");
+          return {
+            pageNumber,
+            text,
+            source,
+            language,
+            characterCount: Array.from(text).length
+          };
+        });
+        const numbers = normalized.map((page) => page.pageNumber).sort((left, right) => left - right);
+        if (new Set(numbers).size !== numbers.length) throw new RangeError("Page numbers must be unique");
+        if (numbers.some((pageNumber, index) => pageNumber !== index + 1)) {
+          throw new RangeError("Page numbers must be continuous from 1");
+        }
+
+        db.prepare("DELETE FROM paper_pages WHERE paper_id = ?").run(id);
+        const insert = db.prepare(`
+          INSERT INTO paper_pages (paper_id, page_number, text, text_source, language, character_count)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `);
+        for (const page of normalized) {
+          insert.run(id, page.pageNumber, page.text, page.source, page.language, page.characterCount);
+        }
+        db.exec("COMMIT");
+        return summarizePages(normalized);
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    });
+  }
+
+  listPaperPages(paperId) {
+    return this.withDb((db) => db.prepare(`
+      SELECT id, paper_id, page_number, text, text_source, language, character_count, created_at, updated_at
+      FROM paper_pages
+      WHERE paper_id = ?
+      ORDER BY page_number ASC
+    `).all(Number(paperId)).map(mapPaperPage));
+  }
+
+  getPaperPage(paperId, pageNumber) {
+    const normalizedPage = normalizePageNumber(pageNumber);
+    return this.withDb((db) => mapPaperPage(db.prepare(`
+      SELECT id, paper_id, page_number, text, text_source, language, character_count, created_at, updated_at
+      FROM paper_pages
+      WHERE paper_id = ? AND page_number = ?
+    `).get(Number(paperId), normalizedPage)));
+  }
+
+  getPaperIndexState(paperId) {
+    return this.withDb((db) => {
+      const rows = db.prepare(`
+        SELECT text_source, COUNT(*) AS count
+        FROM paper_pages
+        WHERE paper_id = ?
+        GROUP BY text_source
+      `).all(Number(paperId));
+      const sources = { pdf: 0, ocr: 0, mixed: 0 };
+      for (const row of rows) sources[row.text_source] = row.count;
+      return { pageCount: rows.reduce((total, row) => total + row.count, 0), sources };
+    });
   }
 
   updatePaper(id, changes = {}) {
