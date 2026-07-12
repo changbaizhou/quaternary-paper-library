@@ -37,6 +37,7 @@ const state = {
   noteSavePromise: null,
   metadataSavePromise: null,
   draftConfirmPromise: null,
+  trashPaperPromise: null,
   reader: {
     document: null,
     loadingTask: null,
@@ -91,6 +92,15 @@ const fields = {
 const saveElements = {
   button: document.querySelector("#savePaperButton"),
   status: document.querySelector("#paperSaveStatus")
+};
+
+const trashElements = {
+  button: document.querySelector("#trashPaperButton"),
+  dialog: document.querySelector("#trashPaperDialog"),
+  title: document.querySelector("#trashPaperDialogTitle"),
+  message: document.querySelector("#trashPaperDialogMessage"),
+  cancel: document.querySelector("#trashPaperDialogCancel"),
+  confirm: document.querySelector("#trashPaperDialogConfirm")
 };
 
 const detailEditableControls = Array.from(
@@ -239,6 +249,20 @@ function confirmAction(title, message, confirmLabel = "确认") {
   });
 }
 
+function confirmTrashPaper(paper) {
+  const message = `确定将《${paper.title || "未命名论文"}》移入回收站吗？原始 PDF 会保留。`;
+  if (!trashElements.dialog?.showModal) return Promise.resolve(window.confirm(message));
+  trashElements.title.textContent = "移入回收站";
+  trashElements.message.textContent = message;
+  return new Promise((resolve) => {
+    trashElements.dialog.onclose = () => {
+      trashElements.dialog.onclose = null;
+      resolve(trashElements.dialog.returnValue === "confirm");
+    };
+    trashElements.dialog.showModal();
+  });
+}
+
 function setMaintenanceBusy(busy, message = "") {
   workspaceElements.maintenance.classList.toggle("is-busy", busy);
   workspaceElements.maintenanceProgress.hidden = !busy;
@@ -293,6 +317,17 @@ function requeueReadingProgress(sentProgress, pendingProgress = {}) {
 function setDetailFormLocked(locked) {
   for (const control of detailEditableControls) control.disabled = locked;
   saveElements.button.disabled = locked;
+  updateTrashPaperButton();
+}
+
+function updateTrashPaperButton() {
+  trashElements.button.disabled = Boolean(
+    !state.selectedPaper ||
+    fields.draftId.value ||
+    state.metadataSavePromise ||
+    state.noteSavePromise ||
+    state.trashPaperPromise
+  );
 }
 
 function chip(label, className = "") {
@@ -475,6 +510,7 @@ function fillFormFromDraft(draft) {
   saveElements.button.textContent = "仍然单独入库";
   renderEvidence(draft);
   renderDraftDuplicateWarning(draft);
+  updateTrashPaperButton();
 }
 
 function renderEvidence(draft) {
@@ -551,6 +587,27 @@ function fillFormFromPaper(paper) {
   saveElements.button.textContent = "保存更改";
   setPaperSaveState("已保存", "is-success");
   document.querySelector("#evidenceBox").textContent = "已确认论文";
+  updateTrashPaperButton();
+}
+
+function clearPaperSelection() {
+  clearNoteAutosave({ resetDirty: true });
+  state.selectedDraft = null;
+  state.selectedPaper = null;
+  fields.draftId.value = "";
+  for (const field of Object.values(fields)) {
+    if (field === fields.draftId) continue;
+    field.value = "";
+  }
+  fields.readingStatus.value = "to-read";
+  document.querySelector("#detailTitle").textContent = "详情";
+  document.querySelector("#detailMode").textContent = "未选择";
+  document.querySelector("#draftDuplicateWarning").hidden = true;
+  document.querySelector("#draftDuplicateWarning").innerHTML = "";
+  document.querySelector("#evidenceBox").textContent = "";
+  saveElements.button.textContent = "确认入库";
+  setPaperSaveState("未修改", "is-neutral");
+  updateTrashPaperButton();
 }
 
 function showPaperListView() {
@@ -1034,6 +1091,53 @@ async function closeReaderAndShowList() {
   }
 }
 
+async function moveSelectedPaperToTrash() {
+  if (
+    !state.selectedPaper ||
+    fields.draftId.value ||
+    state.metadataSavePromise ||
+    state.noteSavePromise ||
+    state.trashPaperPromise
+  ) return;
+
+  const paper = state.selectedPaper;
+  if (!await confirmTrashPaper(paper)) return;
+  if (state.selectedPaper?.id !== paper.id) return;
+
+  const paperIndex = state.papers.findIndex((entry) => entry.id === paper.id);
+  const nextPaperId = paperIndex >= 0 ? state.papers[paperIndex + 1]?.id : null;
+  const promise = (async () => {
+    setStatus("正在移入回收站");
+    if (!(await flushPendingNotes())) return;
+    if (await flushReadingProgress({ force: true, reportErrors: true }) === false) return;
+
+    await api(`/api/papers/${state.selectedPaper.id}`, { method: "DELETE" });
+    await closeReaderDocument();
+    readerElements.viewer.innerHTML = `<div class="empty-state">选择论文后阅读原文件</div>`;
+    updateTranslationPanel("未选择文本", "", { hidden: true });
+    state.papers = state.papers.filter((entry) => entry.id !== paper.id);
+    clearPaperSelection();
+    await refreshLibraryData();
+    showPaperListView();
+    const nextPaper = nextPaperId
+      ? state.papers.find((entry) => entry.id === nextPaperId)
+      : null;
+    if (nextPaper) fillFormFromPaper(nextPaper);
+    renderPapers();
+    setStatus("论文已移入回收站");
+  })();
+  state.trashPaperPromise = promise;
+  updateTrashPaperButton();
+  try {
+    await promise;
+  } catch (error) {
+    setStatus(error.message);
+  } finally {
+    if (state.trashPaperPromise === promise) state.trashPaperPromise = null;
+    updateTrashPaperButton();
+  }
+}
+
 async function loadDrafts() {
   state.drafts = await api("/api/drafts");
   renderDrafts();
@@ -1247,6 +1351,7 @@ async function savePaperMetadata() {
     }
   })();
   state.metadataSavePromise = promise;
+  updateTrashPaperButton();
   try {
     return await promise;
   } finally {
@@ -1299,6 +1404,7 @@ async function savePaperNotes(requestId = state.noteSaveRequestId) {
     }
   })();
   state.noteSavePromise = promise;
+  updateTrashPaperButton();
   try {
     return await promise;
   } finally {
@@ -1366,6 +1472,8 @@ document.querySelector("#paperList").addEventListener("click", async (event) => 
 document.querySelector("#backToListButton").addEventListener("click", async () => {
   await closeReaderAndShowList();
 });
+
+trashElements.button.addEventListener("click", () => void moveSelectedPaperToTrash());
 
 document.querySelector("#previousPageButton").addEventListener("click", () => {
   if (state.reader.pageNumber <= 1) return;

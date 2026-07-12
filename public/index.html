@@ -214,7 +214,10 @@
           </section>
           <div class="detail-save-bar">
             <span id="paperSaveStatus" class="paper-save-status is-neutral" aria-live="polite">未修改</span>
-            <button id="savePaperButton" type="submit">确认入库</button>
+            <div class="detail-action-group">
+              <button id="trashPaperButton" type="button" class="secondary danger-action" disabled>移入回收站</button>
+              <button id="savePaperButton" type="submit">确认入库</button>
+            </div>
           </div>
         </form>
       </section>
@@ -227,6 +230,17 @@
         <div class="dialog-actions">
           <button id="confirmDialogCancel" value="cancel" type="submit" class="secondary">取消</button>
           <button id="confirmDialogConfirm" value="confirm" type="submit">确认</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="trashPaperDialog" class="confirm-dialog">
+      <form method="dialog">
+        <h2 id="trashPaperDialogTitle">移入回收站</h2>
+        <p id="trashPaperDialogMessage"></p>
+        <div class="dialog-actions">
+          <button id="trashPaperDialogCancel" value="cancel" type="submit" class="secondary">取消</button>
+          <button id="trashPaperDialogConfirm" value="confirm" type="submit" class="danger-action">移入回收站</button>
         </div>
       </form>
     </dialog>

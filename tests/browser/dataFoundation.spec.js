@@ -113,11 +113,17 @@ test.describe.serial("Task 9 data foundation smoke", () => {
     await page.locator("#backToListButton").click();
     await expect(page.locator("#notesPersonalField")).toHaveValue(noteText);
 
-    const paperId = await page.locator("#paperList .paper-item").filter({ hasText: paperTitle }).getAttribute("data-paper-id");
-    await page.evaluate(async (id) => {
-      const response = await fetch(`/api/papers/${id}`, { method: "DELETE" });
-      if (!response.ok) throw new Error(`trash failed: ${response.status}`);
-    }, paperId);
+    await page.locator("#trashPaperButton").click();
+    await expect(page.locator("#trashPaperDialog")).toBeVisible();
+    await expect(page.locator("#trashPaperDialog")).toContainText(paperTitle);
+    await page.locator("#trashPaperDialogCancel").click();
+    await expect(page.locator("#paperList .paper-item").filter({ hasText: paperTitle })).toBeVisible();
+
+    await page.locator("#trashPaperButton").click();
+    await expect(page.locator("#trashPaperDialog")).toBeVisible();
+    await page.locator("#trashPaperDialogConfirm").click();
+    await expect(page.locator("#readerView")).toBeHidden();
+    await expect(page.locator("#detailMode")).toHaveText("未选择");
     await page.locator("#trashViewButton").click();
     await expect(page.locator("#trashList")).toContainText(paperTitle);
     await page.locator('#trashList button[data-action="restore-trash"]').click();

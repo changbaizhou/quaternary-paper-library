@@ -133,6 +133,22 @@ test("paper detail exposes metadata save and notes autosave wiring", async () =>
   assert.match(script, /NOTE_AUTOSAVE_DELAY_MS/);
 });
 
+test("paper detail exposes a confirmed move-to-trash workflow", async () => {
+  const html = await readFile("public/index.html", "utf8");
+  const script = await readFile("public/app.js", "utf8");
+
+  assert.match(html, /id="trashPaperButton"[^>]*>移入回收站</);
+  assert.match(html, /id="trashPaperDialog"/);
+  assert.match(html, /id="trashPaperDialogTitle"/);
+  assert.match(html, /id="trashPaperDialogCancel"/);
+  assert.match(html, /id="trashPaperDialogConfirm"/);
+  assert.match(script, /trashPaperDialog/);
+  assert.match(script, /trashPaperDialogCancel/);
+  assert.match(script, /trashPaperDialogConfirm/);
+  assert.match(script, /\/api\/papers\/\$\{state\.selectedPaper\.id\}/);
+  assert.match(script, /method:\s*"DELETE"/);
+});
+
 test("paper save status has a stable bounded text block", async () => {
   const css = await readFile("public/styles.css", "utf8");
 

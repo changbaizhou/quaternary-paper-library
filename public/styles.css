@@ -781,6 +781,13 @@ textarea {
   background: var(--surface);
 }
 
+.detail-action-group {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .paper-save-status {
   min-width: 0;
   height: 34px;
