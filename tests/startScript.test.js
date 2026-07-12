@@ -13,6 +13,9 @@ test("Windows start script launches the local paper library", async () => {
   assert.match(script, /npm install/);
   assert.match(script, /npm start/);
   assert.match(script, /http:\/\/127\.0\.0\.1:8000/);
+  assert.match(script, /setlocal/);
+  assert.doesNotMatch(script, /set\s+"QPL_OCR_[A-Z0-9_]+=/i);
+  assert.doesNotMatch(script, /[A-Z]:\\[^\r\n]*(?:tesseract|pdftoppm|mutool)/i);
   assert.doesNotMatch(script, /(?:AQ\.|sk-[A-Za-z0-9])/);
 });
 

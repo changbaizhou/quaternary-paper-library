@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node src/server.js",
     "reprocess": "node scripts/reprocessLibrary.js",
+    "index-library": "node scripts/indexLibrary.js",
     "test": "node --test",
     "test:browser": "playwright test"
   },

@@ -1,22 +1,10 @@
 # 第四纪论文库
 
-本地优先的第四纪地质学论文管理网页系统。维护账号：`changbaizhou`。
-
-## 主要功能
-
-- 上传 PDF，并保存到本地 `library/files/`。
-- 自动提取 DOI、题名、作者、摘要和关键词；文本不足时可调用本机 OCR。
-- 按第四纪地质学词表推荐主题、区域、时期、材料、方法和指标。
-- 入库前人工确认识别结果，检测文件、DOI 和相似题名重复项。
-- 显式保存论文元数据；个人笔记停止输入约 800 毫秒后自动保存。
-- 连续滚动阅读 PDF，保存上次阅读页和每篇论文唯一书签。
-- 将论文移入回收站后恢复或彻底删除。
-- 创建数据库备份或包含 PDF 的完整备份，并在确认后恢复。
-- 导出 BibTeX、CSV 和 Markdown。
+本地优先的第四纪地质学论文研究工作台。论文 PDF、SQLite 数据库、笔记、标注和备份都保存在本机。
 
 ## 启动
 
-Windows 可直接双击：
+Windows 可双击：
 
 ```text
 启动论文库.bat
@@ -31,72 +19,90 @@ npm start
 
 然后打开 `http://127.0.0.1:8000`。
 
-## 日常使用
+启动脚本会继承用户级环境变量；若存在 `local.env.bat`，会在启动时加载它。OCR 工具路径不要写进批处理文件或仓库，使用环境变量配置。
 
-上传 PDF 后先检查待确认草稿。系统发现重复项时只显示警告，不会自动合并或删除；可以打开已有论文、将草稿并入已有论文、放弃上传，或仍然单独入库。
+## 上传与全文索引
 
-论文详情中的题名、作者、分类等字段需要点击“保存更改”。个人笔记会自动保存，看到“已保存”后即可离开页面。
+上传 PDF 后先检查待确认草稿，再点击确认入库。确认时会自动建立页级全文索引。批量补齐 active 论文的页索引：
 
-“回收站”用于恢复或彻底删除论文。彻底删除和清空回收站都需要第二次明确确认。
-
-## 备份与恢复
-
-备份保存在：
-
-```text
-library/backups/
+```powershell
+npm run index-library
 ```
 
-数据库备份包含 `library.sqlite`、校验清单和说明文件。完整备份还包含 `files/` 中的论文原文件。系统校验文件大小和 SHA-256 后才允许恢复；恢复操作需要明确确认，并会先创建恢复前备份。
+单篇处理和失败重试：
 
-`local.env.bat` 永远不会包含在备份中，也不会提交到 Git。API Key 只应保存在这个本机文件中。
+```powershell
+npm run index-library -- --paper 12
+npm run index-library -- --retry-failed
+```
+
+索引前一定会创建数据库备份并登记 `bulk-index` 原因。任务逐篇运行；成功的页行会保留，失败论文不会写入新页，后续论文仍会继续。没有持久失败表时，`--retry-failed` 会安全地选择仍然没有页行的 active 论文。输出只包含论文 ID、状态和页数；有失败时命令以非零状态退出。
+
+## 搜索与阅读
+
+搜索范围包括：
+
+- `全部`：元数据、全文页和笔记。
+- `元数据`：题名、作者、摘要、分类等字段。
+- `全文`：页级 PDF/OCR 文本。
+- `笔记`：个人研究笔记字段。
+
+全文命中会显示页码。点击结果会打开 PDF 阅读器并跳到命中页；页码输入框、上一页/下一页和书签也会定位阅读位置。扫描版 PDF 在 OCR 可用时会以页为单位补齐索引。
 
 ## OCR
 
-扫描版 PDF 使用本机 Poppler 和 Tesseract OCR，不会把整篇论文发送到外部 OCR 服务。安装后确认以下命令可用：
+OCR 只调用本机 Poppler 和 Tesseract，不把整篇论文发送给 OCR 服务：
 
 ```powershell
 where.exe pdftoppm
 where.exe tesseract
 tesseract --list-langs
-```
-
-中文论文需要 Tesseract 的 `chi_sim` 语言包。常用设置：
-
-```powershell
 $env:QPL_OCR_ENABLED="1"
 $env:QPL_OCR_LANG="chi_sim+eng"
 $env:QPL_OCR_PAGES="3"
 npm start
 ```
 
-可选变量包括 `QPL_OCR_DPI`、`QPL_PDFTOPPM_BIN` 和 `QPL_TESSERACT_BIN`。OCR 不可用时上传仍会成功，但扫描件的自动识别效果会受限。
-
-旧文献可在安装 OCR 后重新处理：
+可选变量包括 `QPL_OCR_DPI`、`QPL_PDFTOPPM_BIN` 和 `QPL_TESSERACT_BIN`。安装 OCR 后可重新处理旧数据：
 
 ```powershell
 npm run reprocess
+npm run index-library -- --retry-failed
 ```
 
-脚本会先创建数据库备份，再更新草稿和已入库论文。
+## 标注与研究卡片
 
-## 翻译
+在阅读器文本层选择文字后，可以保存高亮、批注或摘录。标注包含论文、页码、引用文字和定位上下文，刷新后会恢复；侧栏中的标注和卡片可以跳回原页。摘录可以创建研究卡片，并编辑摘要、个人理解、主题和证据类型。
 
-PDF 阅读器会自动翻译选中的文字，只把选中文字发送给翻译接口，不发送整篇 PDF、数据库或笔记。国内网络建议使用 Qwen 的 OpenAI 兼容接口。
+## 引用校验与格式
 
-将 `local.env.example.bat` 复制为被 Git 忽略的 `local.env.bat`，再填写自己的配置：
+论文详情中的引用元数据可以校验。校验会报告缺失字段，不会猜造卷期、页码、出版社、DOI 或作者信息。可导出：
+
+- GB/T 7714
+- RIS
+- CSL-JSON
+
+导出前应检查引用状态和缺失字段。引用 key 在本地保持唯一，必要时可以显式重新生成。
+
+## 项目与证据
+
+可以创建多个研究项目，把同一篇论文加入多个项目，并分别设置优先级、立场、项目状态和备注。项目证据表汇总论文关系、分类和研究卡片，可导出 CSV 或 Markdown；删除项目不会删除论文、页索引或研究卡片。
+
+## 翻译与研究问答
+
+翻译只发送当前选中文字。研究问答只发送检索得到的页级片段，并为每个片段附带论文和页码出处；不会发送整篇 PDF、数据库、个人笔记或本地绝对路径。答案中的引用必须对应实际检索上下文，点击引用可跳到对应页，也可以把带出处的回答保存为研究卡片。
+
+生产环境默认使用现有 Qwen 配置。把本地配置文件从示例复制出来后填写自己的值：
 
 ```bat
-set QPL_TRANSLATION_ENABLED=1
-set QPL_TRANSLATION_PROVIDER=qwen
-set QWEN_API_KEY=你的_API_Key
-set QPL_QWEN_BASE_URL=你的_OpenAI_兼容地址
-set QPL_QWEN_MODEL=qwen-plus
+copy local.env.example.bat local.env.bat
 ```
 
-系统也支持 Gemini 和 OpenAI，具体变量可参考 `local.env.example.bat`。不要把真实密钥写入源码、README、终端日志或 Git 提交。
+`local.env.bat` 只应保存本机私密配置。README、源码、终端输出和 Git 中都不要写真实 API key；示例中的 key 必须保持占位符。
 
-## 数据位置
+## 备份与数据位置
+
+数据目录结构：
 
 ```text
 library/
@@ -105,19 +111,24 @@ library/
   backups/
 ```
 
-数据库、论文文件、备份和 `local.env.bat` 均不会提交到 GitHub。
+数据库备份包含 SQLite 文件、校验清单和说明文件；完整备份还包含论文文件。恢复前会再次创建备份，并校验文件大小和 SHA-256。批量索引、恢复和其他破坏性操作都应先确认备份记录。
+
+`local.env.bat` 永远不会进入数据库备份、完整备份或 Git；真实 library、真实 PDF、密钥和环境配置都不应提交。
 
 ## 测试
 
 ```powershell
+node --test tests/indexLibrary.test.js tests/startScript.test.js
 npm test
+npm run test:browser
+git diff --check
+```
+
+浏览器测试默认使用 Playwright bundled Chromium。若本机已有 Chrome，可设置：
+
+```powershell
+$env:PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="C:\Program Files\Google\Chrome\Application\chrome.exe"
 npm run test:browser
 ```
 
-首次运行浏览器测试前安装 Chromium：
-
-```powershell
-npx playwright install chromium
-```
-
-若本机网络无法下载 Playwright Chromium，可设置 `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` 指向本机 Chromium/Chrome 可执行文件后再运行测试。
+测试使用临时数据库、临时文件和生成的 PDF；外部翻译与研究 provider 均使用 mock，不联网。

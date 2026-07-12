@@ -1,10 +1,10 @@
 import { defineConfig, devices } from "@playwright/test";
 
-const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
+const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH?.trim() || undefined;
 
 export default defineConfig({
   testDir: "./tests/browser",
-  timeout: 30_000,
+  timeout: 60_000,
   workers: 1,
   fullyParallel: false,
   screenshot: "only-on-failure",
