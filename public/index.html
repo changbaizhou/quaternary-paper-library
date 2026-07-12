@@ -92,6 +92,20 @@
           <h2>待确认</h2>
           <div id="draftList" class="compact-list"></div>
         </section>
+        <section id="libraryResearchPanel" class="panel-section research-panel">
+          <div class="section-heading-row">
+            <h2>研究问答</h2>
+            <span class="panel-subtitle">基于论文页</span>
+          </div>
+          <label>问题<textarea id="researchQuestion" rows="3" placeholder="询问当前资料库中的研究证据"></textarea></label>
+          <label>当前项目<select id="researchProjectScope"><option value="">全部项目</option></select></label>
+          <label>选中论文范围<select id="researchPaperScope" multiple size="4"></select></label>
+          <button id="askResearchButton" type="button">提问</button>
+          <div id="researchStatus" class="research-status" aria-live="polite"></div>
+          <div id="researchAnswer" class="research-answer"></div>
+          <div class="research-history-heading"><strong>历史问答</strong></div>
+          <div id="researchHistory" class="research-history"></div>
+        </section>
       </aside>
 
       <section class="paper-list-panel">
@@ -257,6 +271,18 @@
               <button id="addPaperToProjectButton" type="button" class="secondary compact-action" disabled>加入论文</button>
             </div>
             <div id="projectQueueList" class="project-queue-list"></div>
+            <section id="projectResearchPanel" class="research-panel project-research-panel">
+              <div class="section-heading-row">
+                <h3>项目研究问答</h3>
+                <span class="panel-subtitle">当前项目</span>
+              </div>
+              <label>问题<textarea id="projectResearchQuestion" rows="3" placeholder="询问项目内论文页证据"></textarea></label>
+              <label>论文范围<select id="projectResearchPaperScope" multiple size="4"></select></label>
+              <button id="projectAskResearchButton" type="button" disabled>提问</button>
+              <div id="projectResearchStatus" class="research-status" aria-live="polite"></div>
+              <div id="projectResearchAnswer" class="research-answer"></div>
+              <div id="projectResearchHistory" class="research-history"></div>
+            </section>
           </section>
       </div>
 

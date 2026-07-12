@@ -1670,3 +1670,118 @@ textarea {
     max-width: calc(100% - 42px);
   }
 }
+
+.research-panel {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.research-panel label {
+  min-width: 0;
+}
+
+.research-panel textarea,
+.research-panel select {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.research-panel select[multiple] {
+  min-height: 78px;
+}
+
+.project-research-panel {
+  margin: 0 10px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-soft);
+}
+
+.research-status,
+.research-history-empty,
+.research-card-meta {
+  min-height: 18px;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.research-answer {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding-top: 4px;
+}
+
+.research-answer-heading {
+  display: flex;
+  justify-content: space-between;
+  color: var(--accent-strong);
+  font-size: 12px;
+}
+
+.research-answer-text,
+.research-history-item p {
+  margin: 0;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.research-citations {
+  display: grid;
+  gap: 5px;
+}
+
+.research-citation-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  align-items: center;
+}
+
+.research-citation-link {
+  min-width: 0;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent-strong);
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.research-citation-link:hover {
+  background: transparent;
+  text-decoration: underline;
+}
+
+.research-history-heading {
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.research-history {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.research-history-item {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 7px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface-raised);
+}

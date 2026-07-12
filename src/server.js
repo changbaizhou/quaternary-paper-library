@@ -45,11 +45,19 @@ import {
   VersionConflictError,
   SearchQueryError,
   CitationKeyError,
-  CitationValidationError
+  CitationValidationError,
+  ProjectNotFoundError
 } from "./repository.js";
 import { classifyText } from "./taxonomy.js";
 import { translateText, TranslationError } from "./translation.js";
 import { exportProjectEvidenceCsv, exportProjectEvidenceMarkdown } from "./projects.js";
+import {
+  answerResearchQuestion,
+  buildResearchContext,
+  createQwenResearchProvider,
+  normalizeResearchQuestion,
+  ResearchAssistantError
+} from "./researchAssistant.js";
 
 const upload = multer({ storage: multer.memoryStorage() });
 const arrayPaperFields = new Set([
@@ -253,6 +261,14 @@ function parseFilters(query) {
   return filters;
 }
 
+function researchSearchQuery(question) {
+  const terms = String(question || "")
+    .replace(/\b(?:what|which|how|why|when|where|does|is|are|the|a|an|of|for|to|in|on|当前|什么|哪些|如何|为什么|是否|的|是|吗)\b/giu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+  return terms || question;
+}
+
 function parseSearchInteger(value, fallback, maximum, label) {
   if (value === undefined || value === "") return fallback;
   if (!/^\d+$/.test(String(value))) throw new SearchQueryError();
@@ -441,6 +457,20 @@ function publicResearchCard(card) {
     version: card.version,
     createdAt: card.createdAt,
     updatedAt: card.updatedAt
+  };
+}
+
+function publicResearchAnswer(answer) {
+  return {
+    id: answer.id,
+    question: answer.question,
+    answer: answer.answer,
+    citations: answer.citations,
+    projectId: answer.projectId,
+    paperIds: answer.paperIds,
+    provider: answer.provider,
+    model: answer.model,
+    createdAt: answer.createdAt
   };
 }
 
@@ -1056,6 +1086,138 @@ export function createApp(options = {}) {
         return;
       }
       throw error;
+    }
+  });
+
+  app.post("/api/research/ask", async (request, response, next) => {
+    try {
+      const question = normalizeResearchQuestion(request.body?.question);
+      const researchEnabled = config.researchEnabled ?? (
+        process.env.QPL_RESEARCH_ENABLED === undefined
+          ? (config.translationEnabled ?? process.env.QPL_TRANSLATION_ENABLED === "1")
+          : process.env.QPL_RESEARCH_ENABLED === "1"
+      );
+      if (!researchEnabled) {
+        response.status(503).json({ error: "研究问答功能未启用，请设置 QPL_RESEARCH_ENABLED=1" });
+        return;
+      }
+
+      const projectId = request.body?.projectId === undefined || request.body?.projectId === null || request.body?.projectId === ""
+        ? null
+        : Number(request.body.projectId);
+      if (projectId !== null && (!Number.isSafeInteger(projectId) || projectId < 1)) {
+        response.status(400).json({ error: "projectId must be a positive integer" });
+        return;
+      }
+      const requestedPaperIds = request.body?.paperIds === undefined ? null : request.body.paperIds;
+      if (requestedPaperIds !== null && (!Array.isArray(requestedPaperIds) || requestedPaperIds.some((id) => !Number.isSafeInteger(Number(id)) || Number(id) < 1))) {
+        response.status(400).json({ error: "paperIds must be an array of positive integers" });
+        return;
+      }
+      const paperIds = requestedPaperIds === null ? null : [...new Set(requestedPaperIds.map(Number))];
+      let projectPaperIds = null;
+      if (projectId !== null) {
+        const projectPapers = repo.listProjectPapers(projectId);
+        if (projectPapers === null) {
+          response.status(404).json({ error: "Project not found" });
+          return;
+        }
+        projectPaperIds = projectPapers.filter((paper) => paper.paperStatus === "active").map((paper) => paper.paperId);
+      }
+      if (paperIds) {
+        for (const paperId of paperIds) {
+          const paper = repo.getPaper(paperId);
+          if (!paper) {
+            response.status(404).json({ error: "Paper not found" });
+            return;
+          }
+          if (paper.deletedAt !== null || paper.mergedIntoId !== null) {
+            response.status(409).json({ error: "Paper must be active before research retrieval" });
+            return;
+          }
+        }
+      }
+
+      const search = repo.searchLibrary({ query: researchSearchQuery(question), scope: "fulltext", page: 1, pageSize: 100 });
+      const pageResults = search.items || [];
+      const paperIdsInResults = [...new Set(pageResults.map((item) => item.paperId))];
+      const papers = paperIdsInResults.map((paperId) => {
+        const paper = repo.getPaper(paperId);
+        return paper ? { ...paper, pages: repo.listPaperPages(paperId) } : null;
+      }).filter(Boolean);
+      const context = buildResearchContext(pageResults, papers, { paperIds, projectPaperIds });
+
+      if (!context.items.length) {
+        const saved = repo.saveResearchAnswer({ question, answer: "当前资料库证据不足", citations: [], projectId, provider: "local", model: "" });
+        response.json({ answer: saved.answer, citations: [] });
+        return;
+      }
+
+      const qwenApiKey = config.qwenApiKey ?? process.env.QWEN_API_KEY ?? process.env.DASHSCOPE_API_KEY;
+      if (!qwenApiKey) {
+        response.status(503).json({ error: "未配置 QWEN_API_KEY，无法使用研究问答" });
+        return;
+      }
+      const provider = config.researchProvider || createQwenResearchProvider({
+        qwenApiKey,
+        qwenModel: config.researchModel ?? config.qwenModel ?? process.env.QPL_QWEN_MODEL ?? process.env.QPL_RESEARCH_MODEL,
+        qwenBaseUrl: config.qwenBaseUrl ?? process.env.QPL_QWEN_BASE_URL,
+        qwenEndpoint: config.qwenEndpoint ?? process.env.QPL_QWEN_ENDPOINT,
+        fetchImpl: config.researchFetch,
+        timeoutMs: config.researchTimeoutMs
+      });
+      const result = await answerResearchQuestion({ question, context, provider });
+      const citedPaperIds = [...new Set(result.citations.map((citationId) => context.items.find((item) => item.citationId === citationId)?.paperId).filter(Boolean))];
+      const saved = repo.saveResearchAnswer({
+        question,
+        answer: result.answer,
+        citations: result.citations,
+        paperIds: citedPaperIds,
+        projectId,
+        provider: "qwen",
+        model: config.researchModel ?? config.qwenModel ?? process.env.QPL_QWEN_MODEL ?? process.env.QPL_RESEARCH_MODEL ?? "qwen-plus"
+      });
+      response.json({ answer: saved.answer, citations: saved.citations });
+    } catch (error) {
+      if (error instanceof ResearchAssistantError) {
+        response.status(error.status || 502).json({ error: error.message });
+        return;
+      }
+      if (error instanceof ProjectNotFoundError) {
+        response.status(404).json({ error: error.message });
+        return;
+      }
+      if (error instanceof SearchQueryError || error instanceof TypeError || error instanceof RangeError) {
+        response.status(400).json({ error: error.message });
+        return;
+      }
+      if (error instanceof PaperNotFoundError) {
+        response.status(404).json({ error: error.message });
+        return;
+      }
+      if (error instanceof PaperStateError) {
+        response.status(409).json({ error: error.message });
+        return;
+      }
+      next(error);
+    }
+  });
+
+  app.get("/api/research/answers", (request, response, next) => {
+    try {
+      const limit = parseSearchInteger(request.query.limit, 20, 100, "limit");
+      const answers = repo.listResearchAnswers({ projectId: request.query.projectId, limit });
+      if (answers === null) {
+        response.status(404).json({ error: "Project not found" });
+        return;
+      }
+      response.json(answers.map(publicResearchAnswer));
+    } catch (error) {
+      if (error instanceof SearchQueryError || error instanceof TypeError || error instanceof RangeError) {
+        response.status(400).json({ error: error.message });
+        return;
+      }
+      next(error);
     }
   });
 

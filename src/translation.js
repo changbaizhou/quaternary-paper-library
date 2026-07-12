@@ -12,7 +12,7 @@ function normalizeText(value) {
   return String(value || "").trim();
 }
 
-function extractResponseText(payload) {
+export function extractResponseText(payload) {
   if (typeof payload?.output_text === "string") return payload.output_text.trim();
 
   const candidates = Array.isArray(payload?.candidates) ? payload.candidates : [];
@@ -164,6 +164,34 @@ async function translateWithQwen({ text, targetLanguage, options, fetchImpl }) {
   if (!translatedText) throw new TranslationError(502, "翻译服务暂时不可用");
 
   return { translatedText, provider: "qwen", model };
+}
+
+export async function requestQwenChatCompletion({ messages, options = {}, fetchImpl = fetch }) {
+  const baseUrl = options.qwenBaseUrl || "https://dashscope.aliyuncs.com/compatible-mode/v1";
+  const endpoint = options.qwenEndpoint || joinUrl(baseUrl, "chat/completions");
+  const model = options.qwenModel || "qwen-plus";
+  let response;
+  try {
+    response = await fetchImpl(endpoint, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${options.qwenApiKey}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        temperature: options.temperature ?? 0.2
+      }),
+      ...(options.timeoutMs ? { signal: AbortSignal.timeout(options.timeoutMs) } : {})
+    });
+  } catch {
+    throw new TranslationError(502, "Translation service unavailable");
+  }
+  if (!response.ok) throw new TranslationError(502, "Translation service unavailable");
+  return response.json().catch(() => {
+    throw new TranslationError(502, "Translation service unavailable");
+  });
 }
 
 export async function translateText(input = {}, options = {}) {

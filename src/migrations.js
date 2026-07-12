@@ -316,6 +316,26 @@ const migrations = [
         CREATE INDEX IF NOT EXISTS idx_project_papers_status ON project_papers (project_status);
       `);
     }
+  },
+  {
+    version: 7,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS research_answers (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          question TEXT NOT NULL,
+          answer TEXT NOT NULL,
+          citations_json TEXT NOT NULL DEFAULT '[]',
+          project_id INTEGER REFERENCES research_projects(id) ON DELETE SET NULL,
+          paper_ids_json TEXT NOT NULL DEFAULT '[]',
+          provider TEXT NOT NULL DEFAULT '',
+          model TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_research_answers_project ON research_answers(project_id);
+        CREATE INDEX IF NOT EXISTS idx_research_answers_created ON research_answers(created_at);
+      `);
+    }
   }
 ];
 

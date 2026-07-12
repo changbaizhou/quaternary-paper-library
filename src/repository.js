@@ -215,6 +215,21 @@ function mapResearchCard(row) {
   };
 }
 
+function mapResearchAnswer(row, citations = [], paperIds = []) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    question: row.question,
+    answer: row.answer,
+    citations,
+    projectId: row.project_id,
+    paperIds,
+    provider: row.provider,
+    model: row.model,
+    createdAt: row.created_at
+  };
+}
+
 function mapProject(row) {
   if (!row) return null;
   return {
@@ -357,6 +372,13 @@ export class ProjectVersionConflictError extends Error {
     this.status = 409;
     this.expectedVersion = expected;
     this.actualVersion = actual;
+  }
+}
+
+export class ResearchAnswerNotFoundError extends Error {
+  constructor() {
+    super("Research answer not found");
+    this.name = "ResearchAnswerNotFoundError";
   }
 }
 
@@ -1712,6 +1734,89 @@ export class PaperRepository {
         if (row.card_id !== null) researchCards.push({ id: row.card_id, paperId: row.paper_id, pageNumber: row.card_page_number, quoteText: row.card_quote_text, summary: row.card_summary, evidenceType: row.card_evidence_type });
       }
       return buildEvidenceRows({ projectPapers, papers, researchCards });
+    });
+  }
+
+  expandResearchAnswer(row, db) {
+    if (!row) return null;
+    const citationIds = parseJson(row.citations_json, []);
+    const paperIds = parseJson(row.paper_ids_json, []);
+    const citations = citationIds.map((citationId) => {
+      const match = String(citationId).match(/^P(\d+)-(\d+)$/);
+      if (!match) return null;
+      const paperId = Number(match[1]);
+      const pageNumber = Number(match[2]);
+      const paper = db.prepare("SELECT title FROM papers WHERE id = ?").get(paperId);
+      if (!paper) return null;
+      return { citationId: String(citationId), paperId, pageNumber, title: paper.title };
+    }).filter(Boolean);
+    return mapResearchAnswer(row, citations, paperIds);
+  }
+
+  saveResearchAnswer(input = {}) {
+    return this.withDb((db) => {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const question = String(input.question || "").normalize("NFKC").trim();
+        const answer = String(input.answer || "").trim();
+        if (!question || question.length > 1000) throw new TypeError("question must be between 1 and 1000 characters");
+        if (!answer || answer.length > 4000) throw new TypeError("answer is invalid");
+        const projectId = input.projectId === null || input.projectId === undefined ? null : numericId(input.projectId, "projectId");
+        if (projectId !== null && !db.prepare("SELECT 1 FROM research_projects WHERE id = ?").get(projectId)) throw new ProjectNotFoundError();
+        const citations = [...new Set((input.citations || []).map((citation) => String(citation).trim()))];
+        const paperIds = [...new Set((input.paperIds || citations.map((citation) => citation.match(/^P(\d+)-/)?.[1]).filter(Boolean)).map((id) => numericId(id, "paperId")))];
+        for (const paperId of paperIds) {
+          const paper = db.prepare("SELECT deleted_at, merged_into_id FROM papers WHERE id = ?").get(paperId);
+          if (!paper) throw new PaperNotFoundError();
+          if (paper.deleted_at !== null || paper.merged_into_id !== null) throw new PaperStateError("Paper must be active before saving a research answer");
+        }
+        for (const citationId of citations) {
+          const match = citationId.match(/^P(\d+)-(\d+)$/);
+          if (!match || !db.prepare(`
+            SELECT 1 FROM paper_pages AS pp JOIN papers AS p ON p.id = pp.paper_id
+            WHERE pp.paper_id = ? AND pp.page_number = ? AND p.deleted_at IS NULL AND p.merged_into_id IS NULL
+          `).get(Number(match[1]), Number(match[2]))) {
+            throw new PaperStateError("Research citations must reference active paper pages");
+          }
+        }
+        const result = db.prepare(`
+          INSERT INTO research_answers (question, answer, citations_json, project_id, paper_ids_json, provider, model)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          question,
+          answer,
+          toJson(citations, []),
+          projectId,
+          toJson(paperIds, []),
+          String(input.provider || ""),
+          String(input.model || "")
+        );
+        const row = db.prepare("SELECT * FROM research_answers WHERE id = ?").get(Number(result.lastInsertRowid));
+        const answerRecord = this.expandResearchAnswer(row, db);
+        db.exec("COMMIT");
+        return answerRecord;
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    });
+  }
+
+  getResearchAnswer(id) {
+    return this.withDb((db) => this.expandResearchAnswer(
+      db.prepare("SELECT * FROM research_answers WHERE id = ?").get(numericId(id, "researchAnswerId")), db
+    ));
+  }
+
+  listResearchAnswers({ projectId, limit = 20 } = {}) {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new RangeError("limit must be between 1 and 100");
+    return this.withDb((db) => {
+      const normalizedProjectId = projectId === undefined || projectId === "" || projectId === null ? null : numericId(projectId, "projectId");
+      if (normalizedProjectId !== null && !db.prepare("SELECT 1 FROM research_projects WHERE id = ?").get(normalizedProjectId)) return null;
+      const rows = normalizedProjectId === null
+        ? db.prepare("SELECT * FROM research_answers ORDER BY created_at DESC, id DESC LIMIT ?").all(limit)
+        : db.prepare("SELECT * FROM research_answers WHERE project_id = ? ORDER BY created_at DESC, id DESC LIMIT ?").all(normalizedProjectId, limit);
+      return rows.map((row) => this.expandResearchAnswer(row, db));
     });
   }
 

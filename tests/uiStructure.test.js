@@ -196,6 +196,25 @@ test("frontend exposes safe search scopes and page-targeted hit navigation", asy
   assert.match(script, /textContent/);
 });
 
+test("task 7 exposes research question panels, routes, page citations, and explicit card saving", async () => {
+  const html = await readFile("public/index.html", "utf8");
+  const script = await readFile("public/app.js", "utf8");
+  const css = await readFile("public/styles.css", "utf8");
+
+  for (const id of [
+    "projectResearchPanel", "libraryResearchPanel", "researchQuestion", "researchProjectScope",
+    "researchPaperScope", "askResearchButton", "researchAnswer", "researchHistory", "researchStatus"
+  ]) assert.match(html, new RegExp(`id="${id}"`));
+  assert.match(script, /\/api\/research\/ask/);
+  assert.match(script, /\/api\/research\/answers/);
+  assert.match(script, /AI 生成|AI/);
+  assert.match(script, /targetPage/);
+  assert.match(script, /save.*research.*card|research-card/i);
+  assert.match(script, /textContent/);
+  assert.match(css, /\.research-panel/);
+  assert.match(css, /@media \(max-width: 900px\)/);
+});
+
 test("paper detail exposes a confirmed move-to-trash workflow", async () => {
   const html = await readFile("public/index.html", "utf8");
   const script = await readFile("public/app.js", "utf8");

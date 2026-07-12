@@ -77,7 +77,8 @@ const state = {
     selection: null,
     annotationResolutions: new Map(),
     editingCardId: null
-  }
+  },
+  researchResults: new Map()
 };
 
 const fields = {
@@ -201,6 +202,27 @@ const workspaceElements = {
   duplicateCandidates: document.querySelector("#duplicateCandidates"),
   backupList: document.querySelector("#backupList"),
   maintenanceProgress: document.querySelector("#maintenanceProgress")
+};
+
+const researchElements = {
+  library: {
+    question: document.querySelector("#researchQuestion"),
+    project: document.querySelector("#researchProjectScope"),
+    papers: document.querySelector("#researchPaperScope"),
+    ask: document.querySelector("#askResearchButton"),
+    status: document.querySelector("#researchStatus"),
+    answer: document.querySelector("#researchAnswer"),
+    history: document.querySelector("#researchHistory")
+  },
+  project: {
+    question: document.querySelector("#projectResearchQuestion"),
+    project: null,
+    papers: document.querySelector("#projectResearchPaperScope"),
+    ask: document.querySelector("#projectAskResearchButton"),
+    status: document.querySelector("#projectResearchStatus"),
+    answer: document.querySelector("#projectResearchAnswer"),
+    history: document.querySelector("#projectResearchHistory")
+  }
 };
 
 const viewButtons = {
@@ -663,6 +685,190 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+function appendResearchCitation(container, citation, action = "open-research-citation", researchKey = "") {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "research-citation-link";
+  button.dataset.action = action;
+  button.dataset.citationId = citation.citationId || "";
+  if (researchKey) button.dataset.researchKey = researchKey;
+  button.textContent = `${citation.title || "未命名论文"}，第${citation.pageNumber}页`;
+  container.append(button);
+}
+
+function researchResultKey(panelName, id = "current") {
+  return `${panelName}:${id}`;
+}
+
+function renderResearchResult(panelName, result, container = researchElements[panelName].answer) {
+  const key = researchResultKey(panelName);
+  state.researchResults.set(key, result);
+  container.replaceChildren();
+  if (!result) return;
+  const heading = document.createElement("div");
+  heading.className = "research-answer-heading";
+  const label = document.createElement("strong");
+  label.textContent = "AI 生成";
+  heading.append(label);
+  const answer = document.createElement("p");
+  answer.className = "research-answer-text";
+  answer.textContent = result.answer || "";
+  container.append(heading, answer);
+  const citations = document.createElement("div");
+  citations.className = "research-citations";
+  for (const citation of result.citations || []) {
+    const row = document.createElement("div");
+    row.className = "research-citation-row";
+    appendResearchCitation(row, citation);
+    const save = document.createElement("button");
+    save.type = "button";
+    save.className = "secondary compact-action";
+    save.dataset.action = "save-research-card";
+    save.dataset.citationId = citation.citationId || "";
+    save.textContent = "保存为研究卡片";
+    row.append(save);
+    citations.append(row);
+  }
+  if (citations.childElementCount) container.append(citations);
+}
+
+function renderResearchHistory(panelName, records) {
+  const container = researchElements[panelName].history;
+  container.replaceChildren();
+  if (!records?.length) {
+    const empty = document.createElement("div");
+    empty.className = "research-history-empty";
+    empty.textContent = "暂无历史问答";
+    container.append(empty);
+    return;
+  }
+  for (const record of records) {
+    const recordKey = researchResultKey(panelName, `history-${record.id}`);
+    state.researchResults.set(recordKey, record);
+    const item = document.createElement("article");
+    item.className = "research-history-item";
+    const question = document.createElement("strong");
+    question.textContent = record.question || "";
+    const answer = document.createElement("p");
+    answer.textContent = record.answer || "";
+    const citationList = document.createElement("div");
+    citationList.className = "research-citations";
+    for (const citation of record.citations || []) appendResearchCitation(citationList, citation, "open-research-citation", recordKey);
+    item.append(question, answer, citationList);
+    container.append(item);
+  }
+}
+
+function fillResearchSelect(select, entries, emptyLabel = "全部") {
+  select.replaceChildren();
+  if (select.multiple) {
+    for (const entry of entries) {
+      const option = document.createElement("option");
+      option.value = String(entry.id);
+      option.textContent = entry.title || entry.name || String(entry.id);
+      select.append(option);
+    }
+    return;
+  }
+  const all = document.createElement("option");
+  all.value = "";
+  all.textContent = emptyLabel;
+  select.append(all);
+  for (const entry of entries) {
+    const option = document.createElement("option");
+    option.value = String(entry.id);
+    option.textContent = entry.title || entry.name || String(entry.id);
+    select.append(option);
+  }
+}
+
+function renderResearchScopes() {
+  fillResearchSelect(researchElements.library.project, state.projects, "全部项目");
+  fillResearchSelect(researchElements.library.papers, state.papers);
+  const projectEntries = state.projectPapers.filter((paper) => paper.paperStatus === "active").map((paper) => ({ id: paper.paperId, title: paper.title }));
+  fillResearchSelect(researchElements.project.papers, projectEntries);
+  researchElements.project.ask.disabled = !state.selectedProject;
+}
+
+async function loadResearchHistory(panelName, projectId = "") {
+  const query = projectId ? `?projectId=${encodeURIComponent(projectId)}&limit=20` : "?limit=20";
+  try {
+    renderResearchHistory(panelName, await api(`/api/research/answers${query}`));
+  } catch (error) {
+    researchElements[panelName].history.replaceChildren();
+    researchElements[panelName].status.textContent = error.message;
+  }
+}
+
+async function askResearch(panelName) {
+  const elements = researchElements[panelName];
+  const question = elements.question.value.trim();
+  if (!question) {
+    elements.status.textContent = "请输入问题";
+    return;
+  }
+  const projectId = panelName === "project" ? state.selectedProject?.id : (elements.project.value || undefined);
+  const paperIds = [...elements.papers.selectedOptions].map((option) => Number(option.value)).filter(Boolean);
+  elements.ask.disabled = true;
+  elements.status.textContent = "正在检索论文页并生成回答…";
+  try {
+    const result = await api("/api/research/ask", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ question, ...(projectId ? { projectId: Number(projectId) } : {}), ...(paperIds.length ? { paperIds } : {}) })
+    });
+    renderResearchResult(panelName, result);
+    elements.status.textContent = "回答已生成";
+    await loadResearchHistory(panelName, projectId || "");
+  } catch (error) {
+    elements.answer.replaceChildren();
+    elements.status.textContent = error.message;
+  } finally {
+    elements.ask.disabled = panelName === "project" && !state.selectedProject;
+  }
+}
+
+async function openResearchCitation(panelName, citationId, resultKey = researchResultKey(panelName)) {
+  const result = state.researchResults.get(resultKey);
+  const citation = (result?.citations || []).find((entry) => entry.citationId === citationId);
+  if (!citation) return;
+  const paper = (await loadAllPapers()).find((entry) => entry.id === citation.paperId);
+  if (!paper) return;
+  fillFormFromPaper(paper);
+  await openReader(paper, { targetPage: citation.pageNumber });
+}
+
+async function saveResearchAnswerAsCard(panelName, citationId) {
+  const result = state.researchResults.get(researchResultKey(panelName));
+  const citation = (result?.citations || []).find((entry) => entry.citationId === citationId);
+  if (!citation || !result?.answer) return;
+  try {
+    await api("/api/research-cards", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        paperId: citation.paperId,
+        pageNumber: citation.pageNumber,
+        quoteText: result.answer,
+        summary: result.answer,
+        personalInterpretation: "",
+        themes: [],
+        evidenceType: "uncertain"
+      })
+    });
+    researchElements[panelName].status.textContent = "研究卡片已保存";
+  } catch (error) {
+    researchElements[panelName].status.textContent = error.message;
+  }
+}
+
+function handleResearchPanelClick(panelName, event) {
+  const button = event.target.closest("[data-action]");
+  if (!button) return;
+  if (button.dataset.action === "open-research-citation") void openResearchCitation(panelName, button.dataset.citationId, button.dataset.researchKey || researchResultKey(panelName));
+  if (button.dataset.action === "save-research-card") void saveResearchAnswerAsCard(panelName, button.dataset.citationId);
+}
+
 function formatDateTime(value) {
   if (!value) return "未记录";
   const date = new Date(value);
@@ -1108,6 +1314,8 @@ async function loadSelectedProject(project) {
     state.projectEvidenceRows = [];
     renderProjectQueue();
     renderProjectEvidence();
+    renderResearchScopes();
+    renderResearchHistory("project", []);
     return;
   }
   state.projectPapers = await api(`/api/projects/${project.id}/papers`);
@@ -1115,6 +1323,8 @@ async function loadSelectedProject(project) {
   renderProjects();
   renderProjectQueue();
   renderProjectEvidence();
+  renderResearchScopes();
+  await loadResearchHistory("project", project.id);
 }
 
 async function loadProjects() {
@@ -1927,6 +2137,7 @@ async function loadPapers() {
   state.papers = await api(`/api/papers?${params.toString()}`);
   document.querySelector("#searchResultStatus").hidden = true;
   renderPapers();
+  renderResearchScopes();
 }
 
 async function loadAllPapers() {
@@ -2578,6 +2789,14 @@ document.querySelector("#projectQueueList").addEventListener("click", async (eve
   }
 });
 
+researchElements.library.ask.addEventListener("click", () => void askResearch("library"));
+researchElements.project.ask.addEventListener("click", () => void askResearch("project"));
+researchElements.library.answer.addEventListener("click", (event) => handleResearchPanelClick("library", event));
+researchElements.library.history.addEventListener("click", (event) => handleResearchPanelClick("library", event));
+researchElements.project.answer.addEventListener("click", (event) => handleResearchPanelClick("project", event));
+researchElements.project.history.addEventListener("click", (event) => handleResearchPanelClick("project", event));
+researchElements.library.project.addEventListener("change", () => void loadResearchHistory("library", researchElements.library.project.value));
+
 workspaceElements.projectEvidence.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-action]");
   if (!button) return;
@@ -2829,6 +3048,8 @@ document.querySelector("#draftDuplicateWarning").addEventListener("click", async
 
 await loadDrafts();
 await loadPapers();
+await loadProjects();
+await loadResearchHistory("library");
 await loadTrash();
 await loadBackups();
 await loadDuplicateCandidates();

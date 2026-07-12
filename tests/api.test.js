@@ -1859,6 +1859,129 @@ test("API reindex requires confirmation and reports indexed page sources", async
   );
 });
 
+test("API research returns local evidence insufficiency without calling Qwen", async () => {
+  let called = false;
+  await withServer(
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/research/ask`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ question: "No matching page" })
+      });
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), {
+        answer: "当前资料库证据不足",
+        citations: []
+      });
+      assert.equal(called, false);
+    },
+    {
+      researchEnabled: true,
+      qwenApiKey: "test-key",
+      researchFetch: async () => {
+        called = true;
+        throw new Error("provider should not be called");
+      }
+    }
+  );
+});
+
+test("API research uses Qwen page context and expands citations without returning page text", async () => {
+  await withServer(
+    async (baseUrl, { dbPath }) => {
+      const repo = new PaperRepository(dbPath);
+      const draftId = repo.createDraft({ title: "Research API paper", classification: {} });
+      const paperId = repo.confirmDraft(draftId);
+      repo.replacePaperPages(paperId, [
+        { pageNumber: 1, source: "pdf", text: "Loess evidence supports the result.", language: "en" }
+      ]);
+
+      const response = await fetch(`${baseUrl}/api/research/ask`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ question: "What supports the result?", paperIds: [paperId] })
+      });
+      assert.equal(response.status, 200);
+      const body = await response.json();
+      assert.equal(body.answer, "The result is supported.");
+      assert.deepEqual(body.citations, [{ citationId: `P${paperId}-1`, paperId, pageNumber: 1, title: "Research API paper" }]);
+      assert.doesNotMatch(JSON.stringify(body), /Loess evidence/);
+      assert.doesNotMatch(JSON.stringify(body), /test-key|dashscope|compatible-mode|research-workspace/i);
+
+      const history = await fetch(`${baseUrl}/api/research/answers?limit=1`);
+      assert.equal(history.status, 200);
+      assert.equal((await history.json())[0].citations[0].title, "Research API paper");
+      const db = openDb(dbPath);
+      try {
+        const columns = db.prepare("PRAGMA table_info(research_answers)").all().map((column) => column.name);
+        assert.deepEqual(columns, ["id", "question", "answer", "citations_json", "project_id", "paper_ids_json", "provider", "model", "created_at"]);
+        const stored = db.prepare("SELECT * FROM research_answers").get();
+        assert.doesNotMatch(JSON.stringify(stored), /test-key|Loess evidence|prompt|context/i);
+      } finally {
+        db.close();
+      }
+    },
+    {
+      researchEnabled: true,
+      qwenApiKey: "test-key",
+      qwenModel: "qwen-test",
+      researchFetch: async (_url, options) => {
+        const payload = JSON.parse(options.body);
+        assert.match(payload.messages[1].content, /Loess evidence supports/);
+        return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ answer: "The result is supported.", citations: ["P1-1"] }) } }] }), { status: 200 });
+      }
+    }
+  );
+});
+
+test("API research maps missing Qwen key, provider timeout, and invalid JSON without leaking details", async () => {
+  await withServer(async (baseUrl, { dbPath }) => {
+    const repo = new PaperRepository(dbPath);
+    const draftId = repo.createDraft({ title: "Key requirement paper", classification: {} });
+    const paperId = repo.confirmDraft(draftId);
+    repo.replacePaperPages(paperId, [{ pageNumber: 1, source: "pdf", text: "supports result", language: "en" }]);
+    const response = await fetch(`${baseUrl}/api/research/ask`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ question: "supports result" })
+    });
+    assert.equal(response.status, 503);
+    assert.match((await response.json()).error, /QWEN_API_KEY/);
+  }, { researchEnabled: true, qwenApiKey: "" });
+
+  await withServer(async (baseUrl, { dbPath }) => {
+    const repo = new PaperRepository(dbPath);
+    const draftId = repo.createDraft({ title: "Timeout requirement paper", classification: {} });
+    const paperId = repo.confirmDraft(draftId);
+    repo.replacePaperPages(paperId, [{ pageNumber: 1, source: "pdf", text: "supports result", language: "en" }]);
+    const response = await fetch(`${baseUrl}/api/research/ask`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ question: "supports result" })
+    });
+    assert.equal(response.status, 502);
+    const error = (await response.json()).error;
+    assert.match(error, /研究问答服务暂时不可用/);
+    assert.doesNotMatch(error, /test-key|https?:|[A-Z]:\\/);
+  }, {
+    researchEnabled: true,
+    qwenApiKey: "test-key",
+    researchFetch: async () => { throw new Error("timeout at https://secret.example/key"); }
+  });
+});
+
+test("API research rejects missing projects and inactive paper restrictions accurately", async () => {
+  await withServer(async (baseUrl) => {
+    const missingProject = await fetch(`${baseUrl}/api/research/ask`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ question: "Question", projectId: 999999 })
+    });
+    assert.equal(missingProject.status, 404);
+    assert.match((await missingProject.json()).error, /Project not found/);
+  }, { researchEnabled: true, qwenApiKey: "test-key" });
+});
+
 test("API reindex rejects inactive or source-less papers and preserves old pages on extraction failure", async () => {
   await withServer(
     async (baseUrl, { dbPath, filesDir }) => {
