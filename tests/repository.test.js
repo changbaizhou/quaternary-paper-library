@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 
@@ -374,7 +374,7 @@ test("file storage removes only safe PDF paths", async () => {
     assert.equal(resolveLibraryPdf(dir, "2026/source.txt"), null);
 
     const cleanup = removeLibraryFiles(dir, [
-      "2026/source.pdf",
+      "library/files/2026/source.pdf",
       "2026/source.pdf",
       "2026/missing.pdf",
       "../outside.pdf",
@@ -384,6 +384,30 @@ test("file storage removes only safe PDF paths", async () => {
     assert.equal(cleanup.missing.length, 1);
     assert.equal(cleanup.rejected.length, 2);
     assert.ok([...cleanup.rejected, ...cleanup.missing, ...cleanup.removed].every((value) => !path.isAbsolute(value)));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("file storage resolves portable legacy library paths without escaping files root", async () => {
+  const { resolveLibraryPdf } = await import("../src/fileStorage.js");
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-portable-files-"));
+  const filesDir = path.join(dir, "files");
+  const outsideDir = path.join(dir, "outside");
+
+  try {
+    await mkdir(path.join(filesDir, "2026"), { recursive: true });
+    await mkdir(outsideDir, { recursive: true });
+    await writeFile(path.join(filesDir, "2026", "a.pdf"), "%PDF-1.4");
+    await writeFile(path.join(outsideDir, "outside.pdf"), "%PDF-1.4");
+    await symlink(outsideDir, path.join(filesDir, "linked"), process.platform === "win32" ? "junction" : "dir");
+
+    const expected = path.join(filesDir, "2026", "a.pdf");
+    assert.equal(resolveLibraryPdf(filesDir, "library/files/2026/a.pdf"), expected);
+    assert.equal(resolveLibraryPdf(filesDir, "library\\files\\2026\\a.pdf"), expected);
+    assert.equal(resolveLibraryPdf(filesDir, "library/files/../../outside.pdf"), null);
+    assert.equal(resolveLibraryPdf(filesDir, path.join(outsideDir, "outside.pdf")), null);
+    assert.equal(resolveLibraryPdf(filesDir, "library/files/linked/outside.pdf"), null);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

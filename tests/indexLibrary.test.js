@@ -69,6 +69,24 @@ test("bulk indexing creates its backup before the first paper is processed", asy
   }
 });
 
+test("bulk indexing resolves legacy library paths under the configured files directory", async () => {
+  const { dir, dbPath, filesDir, backupsDir, repo, createPaper } = await fixture();
+  try {
+    const paperId = createPaper("Portable legacy path paper", "library/files/one.pdf");
+    const result = await runIndexLibrary({
+      dbPath,
+      filesDir,
+      backupsDir,
+      output: () => {},
+      extractPdfPages: async (pdfPath) => extractPdfPages(pdfPath)
+    });
+
+    assert.deepEqual(result.results, [{ paperId, status: "indexed", pageCount: 2 }]);
+  } finally {
+    await cleanup(dir);
+  }
+});
+
 test("one failed paper does not block later papers and does not replace old pages", async () => {
   const { dir, dbPath, filesDir, backupsDir, repo, createPaper } = await fixture();
   try {

@@ -51,6 +51,12 @@ function safeLabel(filesRoot, resolvedPath, storedPath) {
   return path.basename(String(storedPath || "").replace(/[\\/]+$/, "")) || "rejected";
 }
 
+function legacyLibrarySuffix(storedPath) {
+  const normalized = String(storedPath).replace(/\\/g, "/");
+  const prefix = "library/files/";
+  return normalized.startsWith(prefix) ? normalized.slice(prefix.length) : null;
+}
+
 export function resolveLibraryPdf(filesDir, storedPath) {
   if (!storedPath) return null;
 
@@ -58,9 +64,12 @@ export function resolveLibraryPdf(filesDir, storedPath) {
   const canonicalRoot = canonicalizeExistingPath(filesRoot);
   if (!canonicalRoot || !existsSync(filesRoot) || !statSync(filesRoot).isDirectory()) return null;
   const rawPath = String(storedPath);
+  const legacySuffix = legacyLibrarySuffix(rawPath);
   const candidates = path.isAbsolute(rawPath)
     ? [path.resolve(rawPath)]
-    : [path.resolve(process.cwd(), rawPath), path.resolve(filesRoot, rawPath)];
+    : legacySuffix !== null
+      ? [path.resolve(filesRoot, legacySuffix)]
+      : [path.resolve(process.cwd(), rawPath), path.resolve(filesRoot, rawPath)];
 
   for (const candidate of candidates) {
     if (path.extname(candidate).toLowerCase() !== ".pdf") continue;
