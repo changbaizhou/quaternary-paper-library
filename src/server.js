@@ -1154,8 +1154,9 @@ export function createApp(options = {}) {
       }
 
       const qwenApiKey = config.qwenApiKey ?? process.env.QWEN_API_KEY ?? process.env.DASHSCOPE_API_KEY;
-      if (!qwenApiKey) {
-        response.status(503).json({ error: "未配置 QWEN_API_KEY，无法使用研究问答" });
+      const deepseekApiKey = config.deepseekApiKey ?? process.env.DEEPSEEK_API_KEY;
+      if (!qwenApiKey && !deepseekApiKey) {
+        response.status(503).json({ error: "未配置 QWEN_API_KEY 或 DEEPSEEK_API_KEY，无法使用研究问答" });
         return;
       }
       const provider = config.researchProvider || createQwenResearchProvider({
@@ -1163,6 +1164,10 @@ export function createApp(options = {}) {
         qwenModel: config.researchModel ?? config.qwenModel ?? process.env.QPL_QWEN_MODEL ?? process.env.QPL_RESEARCH_MODEL,
         qwenBaseUrl: config.qwenBaseUrl ?? process.env.QPL_QWEN_BASE_URL,
         qwenEndpoint: config.qwenEndpoint ?? process.env.QPL_QWEN_ENDPOINT,
+        deepseekApiKey,
+        deepseekModel: config.deepseekModel ?? process.env.QPL_DEEPSEEK_MODEL,
+        deepseekBaseUrl: config.deepseekBaseUrl ?? process.env.QPL_DEEPSEEK_BASE_URL,
+        deepseekEndpoint: config.deepseekEndpoint ?? process.env.QPL_DEEPSEEK_ENDPOINT,
         fetchImpl: config.researchFetch,
         timeoutMs: config.researchTimeoutMs
       });
@@ -1174,8 +1179,10 @@ export function createApp(options = {}) {
         citations: result.citations,
         paperIds: citedPaperIds,
         projectId,
-        provider: "qwen",
-        model: config.researchModel ?? config.qwenModel ?? process.env.QPL_QWEN_MODEL ?? process.env.QPL_RESEARCH_MODEL ?? "qwen-plus"
+        provider: provider.lastProvider || "qwen",
+        model: provider.lastProvider === "deepseek"
+          ? (config.deepseekModel ?? process.env.QPL_DEEPSEEK_MODEL ?? "deepseek-v4-flash")
+          : (config.researchModel ?? config.qwenModel ?? process.env.QPL_QWEN_MODEL ?? process.env.QPL_RESEARCH_MODEL ?? "qwen-plus")
       });
       response.json({ answer: saved.answer, citations: saved.citations });
     } catch (error) {
@@ -1507,6 +1514,10 @@ export function createApp(options = {}) {
           qwenModel: config.qwenModel ?? process.env.QPL_QWEN_MODEL ?? process.env.QPL_TRANSLATION_MODEL,
           qwenBaseUrl: config.qwenBaseUrl ?? process.env.QPL_QWEN_BASE_URL,
           qwenEndpoint: config.qwenEndpoint ?? process.env.QPL_QWEN_ENDPOINT,
+          deepseekApiKey: config.deepseekApiKey ?? process.env.DEEPSEEK_API_KEY,
+          deepseekModel: config.deepseekModel ?? process.env.QPL_DEEPSEEK_MODEL,
+          deepseekBaseUrl: config.deepseekBaseUrl ?? process.env.QPL_DEEPSEEK_BASE_URL,
+          deepseekEndpoint: config.deepseekEndpoint ?? process.env.QPL_DEEPSEEK_ENDPOINT,
           fetchImpl: config.translationFetch
         }
       );

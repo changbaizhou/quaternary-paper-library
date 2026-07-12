@@ -1461,6 +1461,45 @@ test("API Qwen translation returns provider result", async () => {
   );
 });
 
+test("API translation falls back from Qwen to DeepSeek once", async () => {
+  const requests = [];
+  await withServer(
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/translate`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "Short text.", targetLanguage: "zh-CN" })
+      });
+
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), {
+        translatedText: "短文本。",
+        provider: "deepseek",
+        model: "deepseek-v4-flash"
+      });
+      assert.equal(requests.length, 2);
+      assert.match(requests[0].url, /aliyuncs/);
+      assert.equal(requests[1].url, "https://api.deepseek.com/chat/completions");
+      assert.equal(requests[1].body.model, "deepseek-v4-flash");
+    },
+    {
+      translationEnabled: true,
+      translationProvider: "qwen",
+      qwenApiKey: "test-qwen-key",
+      qwenBaseUrl: "https://example.aliyuncs.com/compatible-mode/v1",
+      deepseekApiKey: "test-deepseek-key",
+      translationFetch: async (url, options) => {
+        requests.push({ url, body: JSON.parse(options.body) });
+        if (url.includes("aliyuncs")) return new Response("quota exhausted", { status: 429 });
+        return new Response(JSON.stringify({ choices: [{ message: { content: "短文本。" } }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+    }
+  );
+});
+
 test("API translation rejects empty selections", async () => {
   await withServer(
     async (baseUrl) => {

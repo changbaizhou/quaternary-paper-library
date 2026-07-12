@@ -189,3 +189,26 @@ test("Qwen research falls back when an OpenAI-compatible endpoint rejects respon
   assert.equal(requests[1].response_format, undefined);
   assert.match(requests[2].messages.at(-1).content, /P1-1/);
 });
+
+test("Qwen research falls back to DeepSeek after one failed Qwen request", async () => {
+  const urls = [];
+  const provider = createQwenResearchProvider({
+    qwenApiKey: "test-qwen-key",
+    qwenBaseUrl: "https://example.aliyuncs.com/compatible-mode/v1",
+    deepseekApiKey: "test-deepseek-key",
+    fetchImpl: async (url) => {
+      urls.push(url);
+      if (url.includes("aliyuncs")) return new Response("quota exhausted", { status: 429 });
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({ answer: "Supported", citations: ["P1-1"] }) } }]
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+  });
+  const context = { items: [{ citationId: "P1-1", paperId: 1, pageNumber: 1, title: "Paper", text: "Evidence" }] };
+
+  const payload = await provider({ prompt: "Answer", context });
+
+  assert.deepEqual(parseAndValidateResearchAnswer(payload, context), { answer: "Supported", citations: ["P1-1"] });
+  assert.equal(urls.filter((url) => url.includes("aliyuncs")).length, 1);
+  assert.equal(urls.filter((url) => url.includes("api.deepseek.com")).length, 1);
+});

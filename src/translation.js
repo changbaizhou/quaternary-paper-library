@@ -166,6 +166,31 @@ async function translateWithQwen({ text, targetLanguage, options, fetchImpl }) {
   return { translatedText, provider: "qwen", model };
 }
 
+async function translateWithDeepSeek({ text, targetLanguage, options, fetchImpl }) {
+  const model = options.deepseekModel || "deepseek-v4-flash";
+  const payload = await requestDeepSeekChatCompletion({
+    messages: [
+      {
+        role: "system",
+        content: "You are an academic translator for Quaternary geology papers. Translate the user's selected text into clear Simplified Chinese. Preserve technical terms, numbers, citations, units, and geological time names."
+      },
+      { role: "user", content: translationPrompt(text, targetLanguage) }
+    ],
+    options: {
+      deepseekApiKey: options.deepseekApiKey,
+      deepseekModel: model,
+      deepseekBaseUrl: options.deepseekBaseUrl,
+      deepseekEndpoint: options.deepseekEndpoint,
+      temperature: 0.2,
+      timeoutMs: options.timeoutMs
+    },
+    fetchImpl
+  });
+  const translatedText = extractResponseText(payload);
+  if (!translatedText) throw new TranslationError(502, "Translation service unavailable");
+  return { translatedText, provider: "deepseek", model };
+}
+
 export async function requestQwenChatCompletion({ messages, options = {}, fetchImpl = fetch }) {
   const baseUrl = options.qwenBaseUrl || "https://dashscope.aliyuncs.com/compatible-mode/v1";
   const endpoint = options.qwenEndpoint || joinUrl(baseUrl, "chat/completions");
@@ -176,6 +201,35 @@ export async function requestQwenChatCompletion({ messages, options = {}, fetchI
       method: "POST",
       headers: {
         authorization: `Bearer ${options.qwenApiKey}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        temperature: options.temperature ?? 0.2,
+        ...(options.responseFormat ? { response_format: options.responseFormat } : {})
+      }),
+      ...(options.timeoutMs ? { signal: AbortSignal.timeout(options.timeoutMs) } : {})
+    });
+  } catch {
+    throw new TranslationError(502, "Translation service unavailable");
+  }
+  if (!response.ok) throw new TranslationError(502, "Translation service unavailable");
+  return response.json().catch(() => {
+    throw new TranslationError(502, "Translation service unavailable");
+  });
+}
+
+export async function requestDeepSeekChatCompletion({ messages, options = {}, fetchImpl = fetch }) {
+  const baseUrl = options.deepseekBaseUrl || "https://api.deepseek.com";
+  const endpoint = options.deepseekEndpoint || joinUrl(baseUrl, "chat/completions");
+  const model = options.deepseekModel || "deepseek-v4-flash";
+  let response;
+  try {
+    response = await fetchImpl(endpoint, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${options.deepseekApiKey}`,
         "content-type": "application/json"
       },
       body: JSON.stringify({
@@ -215,8 +269,15 @@ export async function translateText(input = {}, options = {}) {
   }
 
   if (provider === "qwen") {
-    if (!options.qwenApiKey) throw new TranslationError(503, "未配置 QWEN_API_KEY，无法使用 Qwen 翻译");
-    return translateWithQwen({ text, targetLanguage, options, fetchImpl });
+    if (options.qwenApiKey) {
+      try {
+        return await translateWithQwen({ text, targetLanguage, options, fetchImpl });
+      } catch (error) {
+        if (!options.deepseekApiKey) throw error;
+      }
+    }
+    if (options.deepseekApiKey) return translateWithDeepSeek({ text, targetLanguage, options, fetchImpl });
+    throw new TranslationError(503, "未配置 QWEN_API_KEY 或 DEEPSEEK_API_KEY，无法使用在线翻译");
   }
 
   if (!options.apiKey) throw new TranslationError(503, "未配置 OPENAI_API_KEY，无法使用在线翻译");

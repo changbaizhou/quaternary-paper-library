@@ -667,6 +667,10 @@ textarea:focus {
   padding: 10px;
 }
 
+.project-evidence-panel[hidden] {
+  display: none;
+}
+
 .project-evidence-heading {
   display: flex;
   align-items: center;
@@ -1252,6 +1256,31 @@ textarea {
   color: var(--muted);
   font-size: 12px;
   text-align: center;
+}
+
+.auto-translate-toggle {
+  width: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink-soft);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.auto-translate-toggle input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.auto-translate-toggle span {
+  color: inherit;
 }
 
 .bookmark-button,

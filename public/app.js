@@ -7,6 +7,9 @@ const MAX_CANVAS_SCALE = 3;
 const MIN_READER_SCALE = 0.75;
 const MAX_READER_SCALE = 2.6;
 const AUTO_TRANSLATE_DELAY_MS = 450;
+const AUTO_TRANSLATE_STORAGE_KEY = "qpl.autoTranslate";
+const TRANSLATION_CACHE_STORAGE_KEY = "qpl.translationCache.v1";
+const TRANSLATION_CACHE_LIMIT = 200;
 const NOTE_AUTOSAVE_DELAY_MS = 800;
 const READING_PROGRESS_AUTOSAVE_DELAY_MS = 200;
 
@@ -159,6 +162,7 @@ const readerElements = {
   setBookmarkButton: document.querySelector("#setBookmarkButton"),
   goBookmarkButton: document.querySelector("#goBookmarkButton"),
   bookmarkStatusText: document.querySelector("#bookmarkStatusText"),
+  autoTranslateToggle: document.querySelector("#autoTranslateToggle"),
   translateSelectionButton: document.querySelector("#translateSelectionButton"),
   translationPanel: document.querySelector("#translationPanel"),
   translationStatusText: document.querySelector("#translationStatusText"),
@@ -1657,6 +1661,35 @@ function recordLastReadPage(pageNumber) {
   void saveReadingProgress({ lastReadPage: page });
 }
 
+function readTranslationCache() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(TRANSLATION_CACHE_STORAGE_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function translationCacheKey(text, targetLanguage) {
+  return `${targetLanguage}\n${text}`;
+}
+
+function getCachedTranslation(text, targetLanguage) {
+  const key = translationCacheKey(text, targetLanguage);
+  return readTranslationCache().find((entry) => entry?.key === key)?.translatedText || "";
+}
+
+function cacheTranslation(text, targetLanguage, translatedText) {
+  const key = translationCacheKey(text, targetLanguage);
+  const entries = readTranslationCache().filter((entry) => entry?.key !== key);
+  entries.unshift({ key, translatedText });
+  try {
+    localStorage.setItem(TRANSLATION_CACHE_STORAGE_KEY, JSON.stringify(entries.slice(0, TRANSLATION_CACHE_LIMIT)));
+  } catch {
+    // Translation still succeeds when browser storage is unavailable.
+  }
+}
+
 async function translateSelectedText({ selectedText = getSelectedReaderText(), allowDuplicate = true } = {}) {
   if (!state.reader.document) return;
   selectedText = String(selectedText || "").replace(/\s+/g, " ").trim();
@@ -1675,6 +1708,16 @@ async function translateSelectedText({ selectedText = getSelectedReaderText(), a
   const requestId = state.reader.translationRequestId + 1;
   state.reader.translationRequestId = requestId;
   state.reader.pendingTranslationSelection = selectedText;
+  const targetLanguage = "zh-CN";
+  const cached = allowDuplicate ? "" : getCachedTranslation(selectedText, targetLanguage);
+  if (cached) {
+    state.reader.lastTranslatedSelection = selectedText;
+    state.reader.pendingTranslationSelection = "";
+    updateTranslationPanel(`已从缓存读取 ${selectedText.length} 个字符`, cached);
+    setStatus("已使用本地翻译缓存");
+    updateBookmarkControls();
+    return;
+  }
   updateTranslationPanel(`已选择 ${selectedText.length} 个字符`, "正在翻译...");
   setStatus("正在翻译选中文本");
   readerElements.translateSelectionButton.disabled = true;
@@ -1682,10 +1725,11 @@ async function translateSelectedText({ selectedText = getSelectedReaderText(), a
     const result = await api("/api/translate", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text: selectedText, targetLanguage: "zh-CN" })
+      body: JSON.stringify({ text: selectedText, targetLanguage })
     });
     if (requestId !== state.reader.translationRequestId) return;
     state.reader.lastTranslatedSelection = selectedText;
+    cacheTranslation(selectedText, targetLanguage, result.translatedText || "");
     updateTranslationPanel(`已翻译 ${selectedText.length} 个字符`, result.translatedText || "没有返回译文");
     setStatus("翻译完成");
   } catch (error) {
@@ -1702,6 +1746,7 @@ async function translateSelectedText({ selectedText = getSelectedReaderText(), a
 
 function scheduleSelectedTextTranslation() {
   if (!state.reader.document || readerElements.readerView.hidden) return;
+  if (!readerElements.autoTranslateToggle.checked) return;
   const selectedText = getSelectedReaderText();
   if (!selectedText) {
     clearAutoTranslateTimer();
@@ -1717,6 +1762,14 @@ function scheduleSelectedTextTranslation() {
     state.reader.autoTranslateTimer = null;
     void translateSelectedText({ selectedText, allowDuplicate: false });
   }, AUTO_TRANSLATE_DELAY_MS);
+}
+
+function closeOpenDisclosureMenus(event) {
+  if (event.type === "keydown" && event.key !== "Escape") return;
+  for (const menu of document.querySelectorAll("details[open]")) {
+    if (event.type === "pointerdown" && menu.contains(event.target)) continue;
+    menu.removeAttribute("open");
+  }
 }
 
 function resetRenderedPages() {
@@ -2484,6 +2537,29 @@ citationElements.status.addEventListener("change", (event) => void saveCitation(
 citationElements.copyInText.addEventListener("click", () => void copyCitation("in-text-apa"));
 citationElements.copyBibliography.addEventListener("click", () => void copyCitation("gbt7714"));
 citationElements.exportSelected.addEventListener("click", () => void exportSelectedCitations());
+document.addEventListener("pointerdown", closeOpenDisclosureMenus);
+document.addEventListener("keydown", closeOpenDisclosureMenus);
+
+try {
+  readerElements.autoTranslateToggle.checked = localStorage.getItem(AUTO_TRANSLATE_STORAGE_KEY) !== "0";
+} catch {
+  readerElements.autoTranslateToggle.checked = true;
+}
+readerElements.autoTranslateToggle.addEventListener("change", () => {
+  try {
+    localStorage.setItem(AUTO_TRANSLATE_STORAGE_KEY, readerElements.autoTranslateToggle.checked ? "1" : "0");
+  } catch {
+    // The current session still honors the toggle when storage is unavailable.
+  }
+  if (!readerElements.autoTranslateToggle.checked) {
+    clearAutoTranslateTimer();
+    state.reader.pendingTranslationSelection = "";
+    setStatus("已关闭自动翻译");
+    return;
+  }
+  setStatus("已开启自动翻译");
+  scheduleSelectedTextTranslation();
+});
 
 document.querySelector("#backToListButton").addEventListener("click", async () => {
   await closeReaderAndShowList();

@@ -1,4 +1,4 @@
-import { extractResponseText, requestQwenChatCompletion } from "./translation.js";
+import { extractResponseText, requestDeepSeekChatCompletion, requestQwenChatCompletion } from "./translation.js";
 
 export const MAX_RESEARCH_CONTEXT_CHARS = 12000;
 export const MAX_RESEARCH_CONTEXT_PAGES = 8;
@@ -166,8 +166,9 @@ export async function answerResearchQuestion({ question, context, provider }) {
 }
 
 export function createQwenResearchProvider(options = {}) {
-  let supportsStructuredOutput = true;
-  return async ({ prompt, context }) => {
+  let supportsStructuredOutput = !options.qwenBaseUrl;
+  let activeProvider = options.qwenApiKey ? "qwen" : "deepseek";
+  const provider = async ({ prompt, context }) => {
     const systemMessage = {
       role: "system",
       content: "You are a careful research assistant. Return one JSON object only. Every supported conclusion must cite at least one supplied citationId."
@@ -185,13 +186,42 @@ export function createQwenResearchProvider(options = {}) {
       fetchImpl: options.fetchImpl,
       messages
     });
-    const request = async (messages) => {
+    const requestQwen = async (messages) => {
       if (!supportsStructuredOutput) return requestOnce(messages, false);
       try {
         return await requestOnce(messages, true);
       } catch {
         supportsStructuredOutput = false;
         return requestOnce(messages, false);
+      }
+    };
+    const requestDeepSeek = (messages) => requestDeepSeekChatCompletion({
+      options: {
+        deepseekApiKey: options.deepseekApiKey,
+        deepseekModel: options.deepseekModel,
+        deepseekBaseUrl: options.deepseekBaseUrl,
+        deepseekEndpoint: options.deepseekEndpoint,
+        timeoutMs: options.timeoutMs || 15000,
+        temperature: 0.1,
+        responseFormat: { type: "json_object" }
+      },
+      fetchImpl: options.fetchImpl,
+      messages
+    });
+    const request = async (messages) => {
+      if (activeProvider === "deepseek") {
+        provider.lastProvider = "deepseek";
+        return requestDeepSeek(messages);
+      }
+      try {
+        const payload = await requestQwen(messages);
+        provider.lastProvider = "qwen";
+        return payload;
+      } catch (error) {
+        if (!options.deepseekApiKey) throw error;
+        activeProvider = "deepseek";
+        provider.lastProvider = "deepseek";
+        return requestDeepSeek(messages);
       }
     };
     const messages = [systemMessage, { role: "user", content: prompt }];
@@ -213,4 +243,6 @@ export function createQwenResearchProvider(options = {}) {
       ]);
     }
   };
+  provider.lastProvider = activeProvider;
+  return provider;
 }

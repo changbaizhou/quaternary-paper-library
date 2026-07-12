@@ -26,6 +26,8 @@ test("local environment batch file is documented but ignored", async () => {
 
   assert.match(example, /QWEN_API_KEY=/);
   assert.match(example, /QPL_QWEN_BASE_URL=/);
+  assert.match(example, /DEEPSEEK_API_KEY=/);
+  assert.match(example, /QPL_DEEPSEEK_MODEL=deepseek-v4-flash/);
   assert.doesNotMatch(example, /(?:AQ\.|sk-[A-Za-z0-9]{16,})/);
   assert.match(gitignore, /^local\.env\.bat$/m);
 });

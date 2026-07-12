@@ -106,6 +106,30 @@ test("frontend reader automatically translates selected PDF text", async () => {
   assert.match(script, /pendingTranslationSelection/);
 });
 
+test("reader exposes a persistent auto-translate toggle and local translation cache", async () => {
+  const html = await readFile("public/index.html", "utf8");
+  const script = await readFile("public/app.js", "utf8");
+
+  assert.match(html, /id="autoTranslateToggle"[^>]*type="checkbox"/);
+  assert.match(script, /localStorage\.getItem\(TRANSLATION_CACHE_STORAGE_KEY\)/);
+  assert.match(script, /localStorage\.setItem\(TRANSLATION_CACHE_STORAGE_KEY/);
+  assert.match(script, /if \(!readerElements\.autoTranslateToggle\.checked\) return;/);
+});
+
+test("popover menus close on outside interaction and Escape", async () => {
+  const script = await readFile("public/app.js", "utf8");
+
+  assert.match(script, /function closeOpenDisclosureMenus/);
+  assert.match(script, /document\.addEventListener\("pointerdown", closeOpenDisclosureMenus\)/);
+  assert.match(script, /event\.key !== "Escape"/);
+});
+
+test("hidden project evidence does not displace the paper detail form", async () => {
+  const css = await readFile("public/styles.css", "utf8");
+
+  assert.match(css, /\.project-evidence-panel\[hidden\]\s*{\s*display:\s*none;/);
+});
+
 test("task 8 exposes library, trash, and maintenance workspace contracts", async () => {
   const html = await readFile("public/index.html", "utf8");
   const script = await readFile("public/app.js", "utf8");
