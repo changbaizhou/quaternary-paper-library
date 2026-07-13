@@ -235,7 +235,10 @@ test("frontend exposes safe search scopes and page-targeted hit navigation", asy
   const script = await readFile("public/app.js", "utf8");
 
   assert.match(html, /id="searchScope"/);
+  assert.match(html, /id="semanticSearchToggle"[^>]*type="checkbox"[^>]*checked/);
   assert.match(script, /\/api\/search\?/);
+  assert.match(script, /qpl\.semanticSearch/);
+  assert.match(script, /params\.set\("semantic", semanticSearchToggle\.checked \? "1" : "0"\)/);
   assert.match(script, /openReader\(paper, \{\s*targetPage/);
   assert.match(script, /\.pdf-page-wrapper\[data-page-number\]|pdf-page-wrapper/);
   assert.match(script, /scrollIntoView/);

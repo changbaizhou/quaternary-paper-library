@@ -8,6 +8,7 @@ const MIN_READER_SCALE = 0.75;
 const MAX_READER_SCALE = 2.6;
 const AUTO_TRANSLATE_DELAY_MS = 450;
 const AUTO_TRANSLATE_STORAGE_KEY = "qpl.autoTranslate";
+const SEMANTIC_SEARCH_STORAGE_KEY = "qpl.semanticSearch";
 const TRANSLATION_CACHE_STORAGE_KEY = "qpl.translationCache.v1";
 const TRANSLATION_CACHE_LIMIT = 200;
 const NOTE_AUTOSAVE_DELAY_MS = 800;
@@ -114,6 +115,8 @@ const fields = {
   notesQuotePoints: document.querySelector("#notesQuotePointsField"),
   notesPersonal: document.querySelector("#notesPersonalField")
 };
+
+const semanticSearchToggle = document.querySelector("#semanticSearchToggle");
 
 const saveElements = {
   button: document.querySelector("#savePaperButton"),
@@ -2193,6 +2196,7 @@ async function loadPapers() {
     state.searchLoading = true;
     params.set("q", query);
     params.set("scope", document.querySelector("#searchScope").value);
+    params.set("semantic", semanticSearchToggle.checked ? "1" : "0");
     renderPapers();
     try {
       const result = await api(`/api/search?${params.toString()}`);
@@ -2803,6 +2807,19 @@ document.querySelector("#searchInput").addEventListener("keydown", (event) => {
   if (event.key === "Enter") loadPapers();
 });
 document.querySelector("#searchScope").addEventListener("change", () => void loadPapers());
+try {
+  semanticSearchToggle.checked = localStorage.getItem(SEMANTIC_SEARCH_STORAGE_KEY) !== "0";
+} catch {
+  semanticSearchToggle.checked = true;
+}
+semanticSearchToggle.addEventListener("change", () => {
+  try {
+    localStorage.setItem(SEMANTIC_SEARCH_STORAGE_KEY, semanticSearchToggle.checked ? "1" : "0");
+  } catch {
+    // The current session still honors the toggle when storage is unavailable.
+  }
+  if (document.querySelector("#searchInput").value.trim()) void loadPapers();
+});
 document.querySelector("#clearFiltersButton").addEventListener("click", async () => {
   for (const selector of [
     "#searchInput",

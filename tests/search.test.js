@@ -42,7 +42,16 @@ test("buildSearchQuery expands both Chinese and English Quaternary terms", () =>
 
   assert.ok(chinese.highlightTerms.includes("loess"));
   assert.ok(english.highlightTerms.includes("湖泊沉积"));
+  assert.ok(english.highlightTerms.includes("lacustrine"));
   assert.ok(tokenizeQuery("!!! …").length === 0);
+});
+
+test("buildSearchQuery can disable domain semantic expansion", () => {
+  const result = buildSearchQuery("湖泊沉积", { semantic: false });
+
+  assert.deepEqual(result.tokens.map((token) => token.value), ["湖泊沉积"]);
+  assert.deepEqual(result.expandedTerms, []);
+  assert.equal(result.semantic, false);
 });
 
 test("searchLibrary returns active page hits, metadata and notes with filters", async () => {
@@ -93,6 +102,12 @@ test("searchLibrary returns active page hits, metadata and notes with filters", 
     assert.deepEqual(metadata.items.map((item) => item.paperId), [metadataPaperId]);
     assert.equal(metadata.items[0].pageNumber, null);
     assert.equal(metadata.items[0].matchScope, "metadata");
+
+    const semanticMetadata = repo.searchLibrary({ query: "湖泊沉积", scope: "metadata" });
+    const strictMetadata = repo.searchLibrary({ query: "湖泊沉积", scope: "metadata", semantic: false });
+    assert.deepEqual(semanticMetadata.items.map((item) => item.paperId), [metadataPaperId]);
+    assert.ok(semanticMetadata.expandedTerms.includes("lake sediment"));
+    assert.equal(strictMetadata.total, 0);
 
     const notes = repo.searchLibrary({ query: "loess", scope: "notes" });
     assert.deepEqual(notes.items.map((item) => item.paperId), [notesPaperId]);

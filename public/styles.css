@@ -1270,7 +1270,8 @@ textarea {
   text-align: center;
 }
 
-.auto-translate-toggle {
+.auto-translate-toggle,
+.semantic-search-toggle {
   width: auto;
   display: inline-flex;
   align-items: center;
@@ -1284,15 +1285,22 @@ textarea {
   white-space: nowrap;
 }
 
-.auto-translate-toggle input {
+.auto-translate-toggle input,
+.semantic-search-toggle input {
   width: 16px;
   height: 16px;
   margin: 0;
   accent-color: var(--accent);
 }
 
-.auto-translate-toggle span {
+.auto-translate-toggle span,
+.semantic-search-toggle span {
   color: inherit;
+}
+
+.semantic-search-toggle {
+  margin-top: 8px;
+  font-size: 12px;
 }
 
 .bookmark-button,

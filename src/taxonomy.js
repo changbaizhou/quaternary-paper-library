@@ -98,14 +98,24 @@ export const quaternarySearchTermPairs = [
   ["青藏高原", "Qinghai-Tibet Plateau"]
 ];
 
-export function expandQuaternarySearchTerms(value) {
-  const normalized = String(value || "").normalize("NFKC").toLowerCase();
-  const terms = [String(value || "").normalize("NFKC")];
-  for (const pair of quaternarySearchTermPairs) {
-    const match = pair.find((term) => term.normalize("NFKC").toLowerCase() === normalized);
-    if (match) terms.push(pair.find((term) => term !== match));
+export function expandQuaternarySearchTerms(value, { semantic = true } = {}) {
+  const source = String(value || "").normalize("NFKC");
+  if (!semantic) return source ? [source] : [];
+
+  const normalized = source.toLowerCase();
+  const terms = [source];
+  for (const entries of Object.values(taxonomy)) {
+    for (const [label, aliases] of entries) {
+      const conceptTerms = [label, ...aliases];
+      if (conceptTerms.some((term) => normalize(term) === normalized)) terms.push(...conceptTerms);
+    }
   }
-  return [...new Set(terms.filter(Boolean))];
+  for (const pair of quaternarySearchTermPairs) {
+    if (pair.some((term) => normalize(term) === normalized)) terms.push(...pair);
+  }
+  return terms.filter((term, index) =>
+    term && terms.findIndex((candidate) => normalize(candidate) === normalize(term)) === index
+  );
 }
 
 function normalize(value) {

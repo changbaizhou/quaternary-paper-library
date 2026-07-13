@@ -279,6 +279,13 @@ function parseSearchInteger(value, fallback, maximum, label) {
   return parsed;
 }
 
+function parseSearchBoolean(value, fallback = true) {
+  if (value === undefined || value === "") return fallback;
+  if (value === "1" || value === "true") return true;
+  if (value === "0" || value === "false") return false;
+  throw new SearchQueryError();
+}
+
 function requirePurgeConfirmation(body) {
   if (body?.confirm !== true) {
     throw new TypeError("confirm must be true");
@@ -1078,7 +1085,8 @@ export function createApp(options = {}) {
         scope: request.query.scope === undefined ? "all" : request.query.scope,
         filters: parseFilters(request.query),
         page: parseSearchInteger(request.query.page, 1, Number.MAX_SAFE_INTEGER, "page"),
-        pageSize: parseSearchInteger(request.query.pageSize, 20, 100, "pageSize")
+        pageSize: parseSearchInteger(request.query.pageSize, 20, 100, "pageSize"),
+        semantic: parseSearchBoolean(request.query.semantic)
       }));
     } catch (error) {
       if (error instanceof SearchQueryError) {

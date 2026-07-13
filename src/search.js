@@ -43,22 +43,22 @@ function quoteFtsToken(value) {
   return `"${String(value).replaceAll('"', '""')}"`;
 }
 
-function buildGroups(tokens) {
+function buildGroups(tokens, semantic) {
   return tokens.map((token) => {
-    const expanded = expandQuaternarySearchTerms(token.value)
+    const expanded = expandQuaternarySearchTerms(token.value, { semantic })
       .map((value) => ({ value, phrase: token.phrase }))
       .filter((candidate, index, values) => values.findIndex((item) => tokenKey(item) === tokenKey(candidate)) === index);
     return expanded;
   });
 }
 
-export function buildSearchQuery(value) {
+export function buildSearchQuery(value, { semantic = true } = {}) {
   const tokens = tokenizeQuery(value);
   if (tokens.length === 0) return null;
 
   const groups = [];
   let tokenCount = 0;
-  for (const group of buildGroups(tokens)) {
+  for (const group of buildGroups(tokens, semantic)) {
     if (tokenCount >= maxSearchTokens) break;
     const limited = group.slice(0, maxSearchTokens - tokenCount);
     if (limited.length === 0) continue;
@@ -75,12 +75,18 @@ export function buildSearchQuery(value) {
   const highlightTerms = [...new Set(flattenedTokens.flatMap((token) =>
     token.value.split(/\s+/).filter(Boolean)
   ))];
+  const originalTerms = new Set(tokens.map((token) => token.value.normalize("NFKC").toLowerCase()));
+  const expandedTerms = [...new Set(flattenedTokens
+    .map((token) => token.value)
+    .filter((term) => !originalTerms.has(term.normalize("NFKC").toLowerCase())))];
 
   return {
     tokens: flattenedTokens,
     groups,
     match,
     highlightTerms,
+    semantic: Boolean(semantic),
+    expandedTerms,
     maxTokens: maxSearchTokens
   };
 }

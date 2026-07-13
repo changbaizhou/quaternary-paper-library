@@ -1843,11 +1843,20 @@ test("search API validates parameters, applies filters, and never leaks FTS erro
     assert.equal(body.items[0].pageNumber, 2);
     assert.equal(body.items[0].matchScope, "fulltext");
 
+    const semanticHit = await fetch(`${baseUrl}/api/search?q=${encodeURIComponent("湖泊沉积")}&scope=fulltext`);
+    assert.equal(semanticHit.status, 200);
+    assert.equal((await semanticHit.json()).total, 1);
+
+    const strictMiss = await fetch(`${baseUrl}/api/search?q=${encodeURIComponent("湖泊沉积")}&scope=fulltext&semantic=0`);
+    assert.equal(strictMiss.status, 200);
+    assert.equal((await strictMiss.json()).total, 0);
+
     for (const query of [
       "scope=invalid",
       "page=0",
       "page=abc",
-      "pageSize=0"
+      "pageSize=0",
+      "semantic=invalid"
     ]) {
       const response = await fetch(`${baseUrl}/api/search?q=loess&${query}`);
       assert.equal(response.status, 400);

@@ -2285,14 +2285,14 @@ export class PaperRepository {
     });
   }
 
-  searchLibrary({ query = "", scope = "all", filters = {}, page = 1, pageSize = 20 } = {}) {
+  searchLibrary({ query = "", scope = "all", filters = {}, page = 1, pageSize = 20, semantic = true } = {}) {
     if (!searchScopes.has(scope)) throw new SearchQueryError();
     if (!Number.isInteger(page) || page < 1 || !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) {
       throw new SearchQueryError();
     }
 
-    const search = buildSearchQuery(query);
-    if (!search) return { items: [], page, pageSize, total: 0 };
+    const search = buildSearchQuery(query, { semantic });
+    if (!search) return { items: [], page, pageSize, total: 0, semantic: Boolean(semantic), expandedTerms: [] };
 
     return this.withDb((db) => {
       const papers = db.prepare(`
@@ -2382,7 +2382,9 @@ export class PaperRepository {
         items: items.slice(offset, offset + pageSize),
         page,
         pageSize,
-        total: items.length
+        total: items.length,
+        semantic: search.semantic,
+        expandedTerms: search.expandedTerms
       };
     });
   }
