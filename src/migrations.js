@@ -336,6 +336,82 @@ const migrations = [
         CREATE INDEX IF NOT EXISTS idx_research_answers_created ON research_answers(created_at);
       `);
     }
+  },
+  {
+    version: 8,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS paper_references (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          paper_id INTEGER NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+          ordinal INTEGER NOT NULL CHECK (ordinal > 0),
+          page_number INTEGER NOT NULL CHECK (page_number > 0),
+          raw_text TEXT NOT NULL,
+          doi TEXT NOT NULL DEFAULT '',
+          title TEXT NOT NULL DEFAULT '',
+          year INTEGER,
+          matched_paper_id INTEGER REFERENCES papers(id) ON DELETE SET NULL,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE (paper_id, ordinal)
+        );
+        CREATE INDEX IF NOT EXISTS idx_paper_references_paper ON paper_references(paper_id, ordinal);
+        CREATE INDEX IF NOT EXISTS idx_paper_references_doi ON paper_references(doi);
+        CREATE INDEX IF NOT EXISTS idx_paper_references_match ON paper_references(matched_paper_id);
+
+        CREATE TABLE IF NOT EXISTS paper_relations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          source_paper_id INTEGER NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+          target_paper_id INTEGER NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+          relation_type TEXT NOT NULL CHECK (relation_type IN ('cites', 'supports', 'opposes', 'related', 'custom')),
+          reason TEXT NOT NULL DEFAULT '',
+          score REAL NOT NULL DEFAULT 0,
+          confirmed INTEGER NOT NULL DEFAULT 1 CHECK (confirmed IN (0, 1)),
+          origin TEXT NOT NULL DEFAULT 'manual' CHECK (origin IN ('manual', 'reference')),
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          CHECK (source_paper_id <> target_paper_id),
+          UNIQUE (source_paper_id, target_paper_id, relation_type)
+        );
+        CREATE INDEX IF NOT EXISTS idx_paper_relations_source ON paper_relations(source_paper_id);
+        CREATE INDEX IF NOT EXISTS idx_paper_relations_target ON paper_relations(target_paper_id);
+
+        CREATE TABLE IF NOT EXISTS paper_assets (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          paper_id INTEGER NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+          page_number INTEGER NOT NULL CHECK (page_number > 0),
+          asset_type TEXT NOT NULL CHECK (asset_type IN ('figure', 'table')),
+          label TEXT NOT NULL,
+          caption TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE (paper_id, page_number, asset_type, label)
+        );
+        CREATE INDEX IF NOT EXISTS idx_paper_assets_paper_page ON paper_assets(paper_id, page_number);
+
+        CREATE TABLE IF NOT EXISTS custom_terms (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          canonical TEXT NOT NULL COLLATE NOCASE UNIQUE,
+          aliases_json TEXT NOT NULL DEFAULT '[]',
+          category TEXT NOT NULL DEFAULT 'custom',
+          definition TEXT NOT NULL DEFAULT '',
+          version INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS writing_drafts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_id INTEGER UNIQUE REFERENCES research_projects(id) ON DELETE CASCADE,
+          title TEXT NOT NULL DEFAULT '',
+          body TEXT NOT NULL DEFAULT '',
+          citation_style TEXT NOT NULL DEFAULT 'gbt7714' CHECK (citation_style IN ('gbt7714', 'apa7')),
+          cited_paper_ids_json TEXT NOT NULL DEFAULT '[]',
+          version INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_writing_drafts_project ON writing_drafts(project_id);
+      `);
+    }
   }
 ];
 

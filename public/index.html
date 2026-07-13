@@ -18,6 +18,8 @@
       <form id="uploadForm" class="upload-form">
         <input id="pdfInput" type="file" name="files" accept="application/pdf" multiple />
         <button type="submit" class="primary-action">上传 PDF</button>
+        <input id="folderInput" class="visually-hidden" type="file" accept="application/pdf" webkitdirectory multiple />
+        <button id="importFolderButton" type="button" class="secondary">导入文件夹</button>
       </form>
       <div class="header-actions">
         <nav class="view-nav" aria-label="视图">
@@ -35,6 +37,9 @@
           </button>
           <button id="toggleFiltersButton" type="button" class="view-button" aria-pressed="true" title="显示或隐藏检索栏">
             <span aria-hidden="true">⌕</span><span>检索栏</span>
+          </button>
+          <button id="openTerminologyButton" type="button" class="view-button" title="管理第四纪术语词典">
+            <span aria-hidden="true">术</span><span>术语</span>
           </button>
         </nav>
         <div class="export-group top-actions">
@@ -305,13 +310,45 @@
         </div>
         <section id="projectEvidencePanel" class="project-evidence-panel" hidden>
           <div class="project-evidence-heading">
-            <div><h3>证据表</h3><p id="projectEvidenceMeta" class="panel-subtitle"></p></div>
+            <div><h3>证据与写作</h3><p id="projectEvidenceMeta" class="panel-subtitle"></p></div>
             <div class="detail-action-group">
+              <button id="showProjectEvidenceButton" type="button" class="secondary compact-action is-active">证据</button>
+              <button id="showProjectWritingButton" type="button" class="secondary compact-action">写作</button>
               <button id="exportProjectEvidenceCsv" type="button" class="secondary compact-action">CSV</button>
               <button id="exportProjectEvidenceMarkdown" type="button" class="secondary compact-action">Markdown</button>
             </div>
           </div>
-          <div id="projectEvidence" class="project-evidence"></div>
+          <section id="projectEvidenceContent" class="project-evidence-content">
+            <div class="project-evidence-tools">
+              <label>立场
+                <select id="evidenceStanceFilter">
+                  <option value="">全部</option><option value="supports">支持</option><option value="opposes">反对</option><option value="mixed">混合</option><option value="background">背景</option><option value="unknown">未知</option>
+                </select>
+              </label>
+              <label>证据类型
+                <select id="evidenceTypeFilter">
+                  <option value="">全部</option><option value="supports">支持</option><option value="opposes">反对</option><option value="context">背景</option><option value="method">方法</option><option value="uncertain">不确定</option>
+                </select>
+              </label>
+              <div id="projectEvidenceStats" class="project-evidence-stats" aria-live="polite"></div>
+            </div>
+            <div id="projectEvidence" class="project-evidence"></div>
+          </section>
+          <section id="projectWritingPanel" class="project-writing-panel" hidden>
+            <div class="writing-toolbar">
+              <label>标题<input id="writingTitleField" type="text" placeholder="章节或写作主题" /></label>
+              <label>引用格式<select id="writingCitationStyle"><option value="gbt7714">GB/T 7714</option><option value="apa7">APA 7</option></select></label>
+            </div>
+            <label class="writing-body-label">正文<textarea id="writingBodyField" rows="18" placeholder="从证据表插入摘录，或直接撰写正文"></textarea></label>
+            <div class="writing-save-row">
+              <span id="writingSaveStatus" class="status-text" aria-live="polite">未加载</span>
+              <button id="saveWritingDraftButton" type="button">保存草稿</button>
+            </div>
+            <section class="writing-bibliography-section">
+              <h3>参考文献预览</h3>
+              <pre id="writingBibliography" class="writing-bibliography"></pre>
+            </section>
+          </section>
         </section>
         <form id="detailForm" class="detail-form">
           <input type="hidden" id="draftId" />
@@ -407,6 +444,7 @@
           <div class="detail-save-bar">
             <span id="paperSaveStatus" class="paper-save-status is-neutral" aria-live="polite">未修改</span>
             <div class="detail-action-group">
+              <button id="paperKnowledgeButton" type="button" class="secondary" disabled>论文知识</button>
               <button id="paperAddToProjectButton" type="button" class="secondary" disabled>加入项目</button>
               <button id="trashPaperButton" type="button" class="secondary danger-action" disabled>移入回收站</button>
               <button id="savePaperButton" type="submit">确认入库</button>
@@ -467,6 +505,71 @@
           <button id="projectPaperDialogConfirm" value="confirm" type="submit">加入</button>
         </div>
       </form>
+    </dialog>
+
+    <dialog id="terminologyDialog" class="workspace-dialog terminology-dialog">
+      <div class="workspace-dialog-shell">
+        <header class="workspace-dialog-heading">
+          <div><h2>第四纪术语词典</h2><p>自定义同义词会立即参与本地语义检索</p></div>
+          <button id="closeTerminologyButton" type="button" class="secondary icon-button" title="关闭">×</button>
+        </header>
+        <div class="terminology-layout">
+          <section class="terminology-list-pane">
+            <div class="dialog-toolbar">
+              <input id="termSearchInput" type="search" placeholder="搜索术语或别名" />
+              <button id="newTermButton" type="button" class="secondary">新增</button>
+            </div>
+            <div id="termList" class="term-list"></div>
+          </section>
+          <form id="termForm" class="term-form">
+            <input id="termIdField" type="hidden" />
+            <input id="termVersionField" type="hidden" />
+            <label>规范词<input id="termCanonicalField" type="text" required /></label>
+            <label>别名<input id="termAliasesField" type="text" placeholder="用分号分隔中英文同义词" /></label>
+            <label>分类<input id="termCategoryField" type="text" placeholder="时期、区域、方法、指标等" /></label>
+            <label>释义<textarea id="termDefinitionField" rows="6"></textarea></label>
+            <div class="dialog-actions">
+              <button id="deleteTermButton" type="button" class="secondary danger-action" disabled>删除</button>
+              <button id="saveTermButton" type="submit">保存术语</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="paperKnowledgeDialog" class="workspace-dialog knowledge-dialog">
+      <div class="workspace-dialog-shell">
+        <header class="workspace-dialog-heading">
+          <div><h2 id="paperKnowledgeTitle">论文知识</h2><p id="paperKnowledgeMeta">参考文献、关系与图表索引</p></div>
+          <div class="dialog-actions">
+            <button id="rebuildPaperKnowledgeButton" type="button" class="secondary">重新解析</button>
+            <button id="closePaperKnowledgeButton" type="button" class="secondary icon-button" title="关闭">×</button>
+          </div>
+        </header>
+        <div class="knowledge-dialog-body">
+          <section class="knowledge-section relation-section">
+            <div class="section-heading-row"><h3>论文关系</h3><span id="knowledgeRelationCount" class="panel-subtitle"></span></div>
+            <form id="knowledgeRelationForm" class="knowledge-relation-form">
+              <select id="knowledgeRelationTarget" aria-label="关联论文" required><option value="">选择关联论文</option></select>
+              <select id="knowledgeRelationType" aria-label="关系类型"><option value="supports">支持</option><option value="opposes">反对</option><option value="related">相关</option><option value="cites">引用</option><option value="custom">自定义</option></select>
+              <input id="knowledgeRelationReason" type="text" placeholder="关系说明" />
+              <button type="submit" class="secondary compact-action">添加关系</button>
+            </form>
+            <svg id="knowledgeRelationGraph" class="relation-graph" viewBox="0 0 800 310" role="img" aria-label="当前论文关系图"></svg>
+            <div id="knowledgeManualRelations" class="knowledge-manual-relations"></div>
+          </section>
+          <div class="knowledge-lists">
+            <section class="knowledge-section">
+              <div class="section-heading-row"><h3>参考文献</h3><span id="knowledgeReferenceCount" class="panel-subtitle"></span></div>
+              <div id="knowledgeReferenceList" class="knowledge-record-list"></div>
+            </section>
+            <section class="knowledge-section">
+              <div class="section-heading-row"><h3>图表索引</h3><span id="knowledgeAssetCount" class="panel-subtitle"></span></div>
+              <div id="knowledgeAssetList" class="knowledge-record-list"></div>
+            </section>
+          </div>
+        </div>
+      </div>
     </dialog>
 
     <script src="/app.js" type="module"></script>

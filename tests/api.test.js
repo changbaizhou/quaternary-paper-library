@@ -1872,6 +1872,69 @@ test("search API validates parameters, applies filters, and never leaks FTS erro
   });
 });
 
+test("terminology and paper knowledge APIs expose only local derived data", async () => {
+  await withServer(async (baseUrl, { dbPath }) => {
+    const repo = new PaperRepository(dbPath);
+    const targetId = repo.confirmDraft(repo.createDraft({
+      title: "Permafrost response", doi: "10.1000/permafrost", classification: {}, confidence: {}, evidence: {}
+    }));
+    const sourceId = repo.confirmDraft(repo.createDraft({
+      title: "Knowledge source", classification: {}, confidence: {}, evidence: {}
+    }));
+    repo.replacePaperPages(sourceId, [
+      { pageNumber: 1, text: "Fig. 1. Study setting.\nReferences\nSmith, J. 2020. Permafrost response. doi:10.1000/permafrost", source: "pdf" }
+    ]);
+
+    const created = await fetch(`${baseUrl}/api/terms`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ canonical: "permafrost", aliases: ["冻土"], category: "theme", definition: "Frozen ground" })
+    });
+    assert.equal(created.status, 201);
+    const term = await created.json();
+    assert.equal(term.canonical, "permafrost");
+    assert.equal((await fetch(`${baseUrl}/api/search?q=${encodeURIComponent("冻土")}&scope=metadata`)).status, 200);
+
+    const rebuilt = await fetch(`${baseUrl}/api/papers/${sourceId}/knowledge/rebuild`, { method: "POST" });
+    assert.equal(rebuilt.status, 200);
+    assert.deepEqual(await rebuilt.json(), { references: 1, assets: 1, citationRelations: 1 });
+    const knowledgeResponse = await fetch(`${baseUrl}/api/papers/${sourceId}/knowledge`);
+    assert.equal(knowledgeResponse.status, 200);
+    const knowledge = await knowledgeResponse.json();
+    assert.equal(knowledge.references[0].matchedPaperId, targetId);
+    assert.equal(knowledge.assets[0].pageNumber, 1);
+    assert.equal(knowledge.relations.stored[0].targetPaperId, targetId);
+    assert.doesNotMatch(JSON.stringify(knowledge), /storedPath|library\\|library\//i);
+
+    const manualResponse = await fetch(`${baseUrl}/api/papers/${sourceId}/relations`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ targetPaperId: targetId, relationType: "supports", reason: "Same chronology" })
+    });
+    assert.equal(manualResponse.status, 201);
+    const manual = await manualResponse.json();
+    assert.equal(manual.origin, "manual");
+    assert.equal((await fetch(`${baseUrl}/api/papers/${sourceId}/relations/${manual.id}`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ confirm: true })
+    })).status, 200);
+
+    const updated = await fetch(`${baseUrl}/api/terms/${term.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expectedVersion: term.version, aliases: ["冻土", "永久冻土"] })
+    });
+    assert.equal(updated.status, 200);
+    assert.equal((await updated.json()).version, 2);
+    assert.equal((await fetch(`${baseUrl}/api/terms/${term.id}`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ confirm: true })
+    })).status, 200);
+  });
+});
+
 test("API reindex requires confirmation and reports indexed page sources", async () => {
   await withServer(
     async (baseUrl, { dbPath, filesDir, dir }) => {
@@ -2126,4 +2189,46 @@ test("confirming a draft indexes a safe source when available but does not roll 
     },
     { extractPdfPages: async () => { throw new Error("private source path"); } }
   );
+});
+
+test("project writing API persists drafts, inserts evidence, and filters evidence rows", async () => {
+  await withServer(async (baseUrl, { dbPath }) => {
+    const repo = new PaperRepository(dbPath);
+    const paperId = repo.confirmDraft(repo.createDraft({
+      title: "Writing API paper",
+      authors: ["Zhou Changbai"],
+      year: 2026,
+      journal: "Quaternary Research",
+      classification: {}
+    }));
+    const project = repo.createProject({ name: "Writing API project" });
+    repo.addProjectPaper(project.id, paperId, { stance: "supports" });
+
+    const initialResponse = await fetch(`${baseUrl}/api/projects/${project.id}/writing`);
+    assert.equal(initialResponse.status, 200);
+    const initial = await initialResponse.json();
+    assert.equal(initial.version, 1);
+
+    const updateResponse = await fetch(`${baseUrl}/api/projects/${project.id}/writing`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Chapter", body: "Opening", citationStyle: "gbt7714", citedPaperIds: [], expectedVersion: initial.version })
+    });
+    assert.equal(updateResponse.status, 200);
+    const updated = await updateResponse.json();
+
+    const insertResponse = await fetch(`${baseUrl}/api/projects/${project.id}/writing/evidence`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ paperId, quote: "Quoted evidence", pageNumber: 2, expectedVersion: updated.version })
+    });
+    assert.equal(insertResponse.status, 200);
+    const inserted = await insertResponse.json();
+    assert.deepEqual(inserted.citedPaperIds, [paperId]);
+    assert.match(inserted.bibliography, /Writing API paper/);
+
+    const filtered = await fetch(`${baseUrl}/api/projects/${project.id}/evidence?format=json&stance=opposes`);
+    assert.equal(filtered.status, 200);
+    assert.deepEqual(await filtered.json(), []);
+  });
 });

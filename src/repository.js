@@ -13,6 +13,19 @@ import {
   normalizeProjectInput,
   normalizeProjectPaperInput
 } from "./projects.js";
+import {
+  normalizeCustomTermInput,
+  normalizePaperRelationInput,
+  parsePaperAssets,
+  parsePaperReferences,
+  scorePaperRelations
+} from "./knowledge.js";
+import {
+  buildEvidenceInsert,
+  formatWritingBibliography,
+  normalizeWritingDraftInput,
+  normalizeWritingEvidenceInput
+} from "./writing.js";
 
 const draftJsonFields = {
   authors: "authors_json",
@@ -265,6 +278,106 @@ function mapProjectPaper(row) {
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
+}
+
+function mapPaperReference(row) {
+  return {
+    id: row.id,
+    paperId: row.paper_id,
+    ordinal: row.ordinal,
+    pageNumber: row.page_number,
+    rawText: row.raw_text,
+    doi: row.doi,
+    title: row.title,
+    year: row.year,
+    matchedPaperId: row.matched_paper_id,
+    createdAt: row.created_at
+  };
+}
+
+function mapPaperAsset(row) {
+  return {
+    id: row.id,
+    paperId: row.paper_id,
+    pageNumber: row.page_number,
+    assetType: row.asset_type,
+    label: row.label,
+    caption: row.caption,
+    createdAt: row.created_at
+  };
+}
+
+function mapPaperRelation(row) {
+  return {
+    id: row.id,
+    sourcePaperId: row.source_paper_id,
+    targetPaperId: row.target_paper_id,
+    relationType: row.relation_type,
+    reason: row.reason,
+    score: Number(row.score) || 0,
+    confirmed: Boolean(row.confirmed),
+    origin: row.origin,
+    targetTitle: row.target_title || "",
+    targetAuthors: parseJson(row.target_authors_json, []),
+    targetYear: row.target_year ?? null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function mapCustomTerm(row) {
+  return {
+    id: row.id,
+    canonical: row.canonical,
+    aliases: parseJson(row.aliases_json, []),
+    category: row.category,
+    definition: row.definition,
+    version: row.version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function mapWritingDraft(row, papers = []) {
+  if (!row) return null;
+  const citedPaperIds = parseJson(row.cited_paper_ids_json, []);
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    title: row.title,
+    body: row.body,
+    citationStyle: row.citation_style,
+    citedPaperIds,
+    bibliography: formatWritingBibliography(papers, row.citation_style),
+    version: row.version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function requireWritingDraft(db, projectId) {
+  if (!db.prepare("SELECT 1 FROM research_projects WHERE id = ?").get(projectId)) throw new ProjectNotFoundError();
+  db.prepare("INSERT OR IGNORE INTO writing_drafts (project_id) VALUES (?)").run(projectId);
+  return db.prepare("SELECT * FROM writing_drafts WHERE project_id = ?").get(projectId);
+}
+
+function expandWritingDraft(db, row) {
+  if (!row) return null;
+  const ids = parseJson(row.cited_paper_ids_json, []);
+  const papers = ids.map((id) => mapPaper(db.prepare("SELECT * FROM papers WHERE id = ?").get(id))).filter(Boolean);
+  return mapWritingDraft(row, papers);
+}
+
+function requireProjectCitedPapers(db, projectId, paperIds) {
+  for (const paperId of paperIds) {
+    const row = db.prepare(`
+      SELECT p.deleted_at, p.merged_into_id
+      FROM project_papers AS pp JOIN papers AS p ON p.id = pp.paper_id
+      WHERE pp.project_id = ? AND pp.paper_id = ?
+    `).get(projectId, paperId);
+    if (!row) throw new PaperStateError("Cited paper must belong to the project");
+    if (row.deleted_at !== null || row.merged_into_id !== null) throw new PaperStateError("Cited paper must be active");
+  }
 }
 
 function mapBackup(row) {
@@ -1362,6 +1475,285 @@ export class PaperRepository {
     `).get(Number(paperId), normalizedPage)));
   }
 
+  rebuildPaperKnowledge(paperId) {
+    return this.withDb((db) => {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const id = numericId(paperId, "paperId");
+        const paperRow = db.prepare("SELECT * FROM papers WHERE id = ?").get(id);
+        if (!paperRow) throw new PaperNotFoundError();
+        if (paperRow.deleted_at !== null || paperRow.merged_into_id !== null) {
+          throw new PaperStateError("Paper must be active before rebuilding knowledge");
+        }
+        const pages = db.prepare(`
+          SELECT page_number AS pageNumber, text FROM paper_pages
+          WHERE paper_id = ? ORDER BY page_number ASC
+        `).all(id);
+        const references = parsePaperReferences(pages);
+        const assets = parsePaperAssets(pages);
+        const activePapers = db.prepare(`
+          SELECT id, normalized_doi, normalized_title FROM papers
+          WHERE deleted_at IS NULL AND merged_into_id IS NULL AND id <> ?
+        `).all(id);
+        const byDoi = new Map(activePapers.filter((row) => row.normalized_doi).map((row) => [row.normalized_doi, row.id]));
+        const byTitle = new Map(activePapers.filter((row) => row.normalized_title).map((row) => [row.normalized_title, row.id]));
+
+        db.prepare("DELETE FROM paper_references WHERE paper_id = ?").run(id);
+        db.prepare("DELETE FROM paper_assets WHERE paper_id = ?").run(id);
+        db.prepare("DELETE FROM paper_relations WHERE source_paper_id = ? AND origin = 'reference'").run(id);
+        const insertReference = db.prepare(`
+          INSERT INTO paper_references (
+            paper_id, ordinal, page_number, raw_text, doi, title, year, matched_paper_id
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        const insertRelation = db.prepare(`
+          INSERT INTO paper_relations (
+            source_paper_id, target_paper_id, relation_type, reason, score, confirmed, origin
+          ) VALUES (?, ?, 'cites', ?, 1, 1, 'reference')
+          ON CONFLICT(source_paper_id, target_paper_id, relation_type) DO UPDATE SET
+            reason = excluded.reason, score = excluded.score, confirmed = 1, origin = 'reference', updated_at = CURRENT_TIMESTAMP
+        `);
+        const matchedTargets = new Set();
+        for (const reference of references) {
+          const matchedPaperId = reference.doi
+            ? byDoi.get(normalizeDoi(reference.doi)) || null
+            : byTitle.get(normalizeTitle(reference.title)) || null;
+          insertReference.run(
+            id, reference.ordinal, reference.pageNumber, reference.rawText,
+            reference.doi, reference.title, reference.year, matchedPaperId
+          );
+          if (matchedPaperId && !matchedTargets.has(matchedPaperId)) {
+            matchedTargets.add(matchedPaperId);
+            insertRelation.run(id, matchedPaperId, `参考文献 ${reference.ordinal}`);
+          }
+        }
+        const insertAsset = db.prepare(`
+          INSERT INTO paper_assets (paper_id, page_number, asset_type, label, caption)
+          VALUES (?, ?, ?, ?, ?)
+        `);
+        for (const asset of assets) {
+          insertAsset.run(id, asset.pageNumber, asset.assetType, asset.label, asset.caption);
+        }
+        db.exec("COMMIT");
+        return { references: references.length, assets: assets.length, citationRelations: matchedTargets.size };
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    });
+  }
+
+  listPaperReferences(paperId) {
+    const id = numericId(paperId, "paperId");
+    return this.withDb((db) => db.prepare(`
+      SELECT * FROM paper_references WHERE paper_id = ? ORDER BY ordinal ASC
+    `).all(id).map(mapPaperReference));
+  }
+
+  listPaperAssets(paperId) {
+    const id = numericId(paperId, "paperId");
+    return this.withDb((db) => db.prepare(`
+      SELECT * FROM paper_assets WHERE paper_id = ? ORDER BY page_number ASC, id ASC
+    `).all(id).map(mapPaperAsset));
+  }
+
+  listPaperRelations(paperId) {
+    const id = numericId(paperId, "paperId");
+    return this.withDb((db) => {
+      const source = mapPaper(db.prepare("SELECT * FROM papers WHERE id = ?").get(id));
+      if (!source) throw new PaperNotFoundError();
+      const stored = db.prepare(`
+        SELECT pr.*, p.title AS target_title, p.authors_json AS target_authors_json, p.year AS target_year
+        FROM paper_relations AS pr JOIN papers AS p ON p.id = pr.target_paper_id
+        WHERE pr.source_paper_id = ? AND p.deleted_at IS NULL AND p.merged_into_id IS NULL
+        ORDER BY pr.relation_type ASC, pr.target_paper_id ASC
+      `).all(id).map(mapPaperRelation);
+      const candidates = db.prepare(`
+        SELECT * FROM papers WHERE id <> ? AND deleted_at IS NULL AND merged_into_id IS NULL
+      `).all(id).map(mapPaper);
+      const storedTargets = new Set(stored.map((relation) => relation.targetPaperId));
+      const suggested = scorePaperRelations(source, candidates)
+        .filter((relation) => !storedTargets.has(relation.targetPaperId))
+        .map((relation) => {
+          const target = candidates.find((paper) => paper.id === relation.targetPaperId);
+          return { ...relation, targetTitle: target?.title || "", targetAuthors: target?.authors || [], targetYear: target?.year ?? null };
+        });
+      return { stored, suggested };
+    });
+  }
+
+  upsertPaperRelation(sourcePaperId, targetPaperId, input = {}) {
+    const sourceId = numericId(sourcePaperId, "sourcePaperId");
+    const fields = normalizePaperRelationInput({ ...input, targetPaperId });
+    if (sourceId === fields.targetPaperId) throw new TypeError("Source and target papers must be different");
+    return this.withDb((db) => {
+      const rows = db.prepare(`
+        SELECT id, deleted_at, merged_into_id FROM papers WHERE id IN (?, ?)
+      `).all(sourceId, fields.targetPaperId);
+      if (rows.length !== 2) throw new PaperNotFoundError();
+      if (rows.some((paper) => paper.deleted_at !== null || paper.merged_into_id !== null)) throw new PaperStateError("Paper relations require active papers");
+      db.prepare(`
+        INSERT INTO paper_relations (
+          source_paper_id, target_paper_id, relation_type, reason, score, confirmed, origin
+        ) VALUES (?, ?, ?, ?, 1, 1, 'manual')
+        ON CONFLICT(source_paper_id, target_paper_id, relation_type) DO UPDATE SET
+          reason = excluded.reason, score = 1, confirmed = 1, origin = 'manual', updated_at = CURRENT_TIMESTAMP
+      `).run(sourceId, fields.targetPaperId, fields.relationType, fields.reason);
+      return mapPaperRelation(db.prepare(`
+        SELECT pr.*, p.title AS target_title, p.authors_json AS target_authors_json, p.year AS target_year
+        FROM paper_relations AS pr JOIN papers AS p ON p.id = pr.target_paper_id
+        WHERE pr.source_paper_id = ? AND pr.target_paper_id = ? AND pr.relation_type = ?
+      `).get(sourceId, fields.targetPaperId, fields.relationType));
+    });
+  }
+
+  deletePaperRelation(sourcePaperId, relationId) {
+    const sourceId = numericId(sourcePaperId, "sourcePaperId");
+    const id = numericId(relationId, "relationId");
+    return this.withDb((db) => Number(db.prepare(`
+      DELETE FROM paper_relations WHERE id = ? AND source_paper_id = ? AND origin = 'manual'
+    `).run(id, sourceId).changes) === 1);
+  }
+
+  listCustomTerms(query = "") {
+    const needle = String(query || "").normalize("NFKC").trim().toLowerCase();
+    return this.withDb((db) => db.prepare(`
+      SELECT * FROM custom_terms ORDER BY canonical COLLATE NOCASE ASC, id ASC
+    `).all().map(mapCustomTerm).filter((term) => !needle || [
+      term.canonical, term.category, term.definition, ...term.aliases
+    ].some((value) => String(value || "").toLowerCase().includes(needle))));
+  }
+
+  createCustomTerm(input = {}) {
+    const fields = normalizeCustomTermInput(input);
+    return this.withDb((db) => {
+      try {
+        const result = db.prepare(`
+          INSERT INTO custom_terms (canonical, aliases_json, category, definition)
+          VALUES (?, ?, ?, ?)
+        `).run(fields.canonical, toJson(fields.aliases, []), fields.category, fields.definition);
+        return mapCustomTerm(db.prepare("SELECT * FROM custom_terms WHERE id = ?").get(Number(result.lastInsertRowid)));
+      } catch (error) {
+        if (/UNIQUE constraint failed/i.test(error.message)) throw new TypeError("canonical already exists");
+        throw error;
+      }
+    });
+  }
+
+  updateCustomTerm(termId, input = {}) {
+    const id = numericId(termId, "termId");
+    const expectedVersion = numericId(input.expectedVersion, "expectedVersion");
+    const fields = normalizeCustomTermInput(input, { partial: true });
+    const keys = Object.keys(fields);
+    if (!keys.length) throw new TypeError("At least one term field is required");
+    return this.withDb((db) => {
+      const current = db.prepare("SELECT * FROM custom_terms WHERE id = ?").get(id);
+      if (!current) return null;
+      if (current.version !== expectedVersion) throw new VersionConflictError(expectedVersion, current.version);
+      const values = {
+        canonical: fields.canonical ?? current.canonical,
+        aliases: fields.aliases ?? parseJson(current.aliases_json, []),
+        category: fields.category ?? current.category,
+        definition: fields.definition ?? current.definition
+      };
+      try {
+        db.prepare(`
+          UPDATE custom_terms SET canonical = ?, aliases_json = ?, category = ?, definition = ?,
+            version = version + 1, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND version = ?
+        `).run(values.canonical, toJson(values.aliases, []), values.category, values.definition, id, expectedVersion);
+      } catch (error) {
+        if (/UNIQUE constraint failed/i.test(error.message)) throw new TypeError("canonical already exists");
+        throw error;
+      }
+      return mapCustomTerm(db.prepare("SELECT * FROM custom_terms WHERE id = ?").get(id));
+    });
+  }
+
+  deleteCustomTerm(termId) {
+    const id = numericId(termId, "termId");
+    return this.withDb((db) => db.prepare("DELETE FROM custom_terms WHERE id = ?").run(id).changes > 0);
+  }
+
+  getWritingDraft(projectId) {
+    const id = numericId(projectId, "projectId");
+    return this.withDb((db) => {
+      const row = requireWritingDraft(db, id);
+      return expandWritingDraft(db, row);
+    });
+  }
+
+  updateWritingDraft(projectId, input = {}) {
+    const id = numericId(projectId, "projectId");
+    const expectedVersion = numericId(input.expectedVersion, "expectedVersion");
+    const fields = normalizeWritingDraftInput(input, { partial: true });
+    if (!Object.keys(fields).length) throw new TypeError("At least one writing field is required");
+    return this.withDb((db) => {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const current = requireWritingDraft(db, id);
+        if (current.version !== expectedVersion) throw new VersionConflictError(expectedVersion, current.version);
+        const values = {
+          title: fields.title ?? current.title,
+          body: fields.body ?? current.body,
+          citationStyle: fields.citationStyle ?? current.citation_style,
+          citedPaperIds: fields.citedPaperIds ?? parseJson(current.cited_paper_ids_json, [])
+        };
+        requireProjectCitedPapers(db, id, values.citedPaperIds);
+        const result = db.prepare(`
+          UPDATE writing_drafts
+          SET title = ?, body = ?, citation_style = ?, cited_paper_ids_json = ?,
+            version = version + 1, updated_at = CURRENT_TIMESTAMP
+          WHERE project_id = ? AND version = ?
+        `).run(values.title, values.body, values.citationStyle, toJson(values.citedPaperIds, []), id, expectedVersion);
+        if (Number(result.changes) !== 1) {
+          const actual = db.prepare("SELECT version FROM writing_drafts WHERE project_id = ?").get(id)?.version;
+          throw new VersionConflictError(expectedVersion, actual);
+        }
+        const updated = expandWritingDraft(db, db.prepare("SELECT * FROM writing_drafts WHERE project_id = ?").get(id));
+        db.exec("COMMIT");
+        return updated;
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    });
+  }
+
+  insertWritingEvidence(projectId, input = {}) {
+    const id = numericId(projectId, "projectId");
+    const expectedVersion = numericId(input.expectedVersion, "expectedVersion");
+    const evidence = normalizeWritingEvidenceInput(input);
+    return this.withDb((db) => {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const current = requireWritingDraft(db, id);
+        if (current.version !== expectedVersion) throw new VersionConflictError(expectedVersion, current.version);
+        requireProjectCitedPapers(db, id, [evidence.paperId]);
+        const paper = mapPaper(db.prepare("SELECT * FROM papers WHERE id = ?").get(evidence.paperId));
+        const addition = buildEvidenceInsert({
+          paper,
+          quote: evidence.quote,
+          pageNumber: evidence.pageNumber,
+          citationStyle: current.citation_style
+        });
+        const body = [current.body.trim(), addition].filter(Boolean).join("\n\n");
+        const citedPaperIds = [...new Set([...parseJson(current.cited_paper_ids_json, []), evidence.paperId])];
+        db.prepare(`
+          UPDATE writing_drafts
+          SET body = ?, cited_paper_ids_json = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP
+          WHERE project_id = ? AND version = ?
+        `).run(body, toJson(citedPaperIds, []), id, expectedVersion);
+        const updated = expandWritingDraft(db, db.prepare("SELECT * FROM writing_drafts WHERE project_id = ?").get(id));
+        db.exec("COMMIT");
+        return updated;
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    });
+  }
+
   listAnnotations(paperId) {
     return this.withDb((db) => {
       const params = [];
@@ -2291,10 +2683,11 @@ export class PaperRepository {
       throw new SearchQueryError();
     }
 
-    const search = buildSearchQuery(query, { semantic });
-    if (!search) return { items: [], page, pageSize, total: 0, semantic: Boolean(semantic), expandedTerms: [] };
-
     return this.withDb((db) => {
+      const termGroups = db.prepare("SELECT canonical, aliases_json FROM custom_terms ORDER BY id ASC").all()
+        .map((row) => [row.canonical, ...parseJson(row.aliases_json, [])]);
+      const search = buildSearchQuery(query, { semantic, termGroups });
+      if (!search) return { items: [], page, pageSize, total: 0, semantic: Boolean(semantic), expandedTerms: [] };
       const papers = db.prepare(`
         SELECT * FROM papers
         WHERE deleted_at IS NULL AND merged_into_id IS NULL

@@ -98,7 +98,7 @@ export const quaternarySearchTermPairs = [
   ["青藏高原", "Qinghai-Tibet Plateau"]
 ];
 
-export function expandQuaternarySearchTerms(value, { semantic = true } = {}) {
+export function expandQuaternarySearchTerms(value, { semantic = true, additionalGroups = [] } = {}) {
   const source = String(value || "").normalize("NFKC");
   if (!semantic) return source ? [source] : [];
 
@@ -112,6 +112,9 @@ export function expandQuaternarySearchTerms(value, { semantic = true } = {}) {
   }
   for (const pair of quaternarySearchTermPairs) {
     if (pair.some((term) => normalize(term) === normalized)) terms.push(...pair);
+  }
+  for (const group of additionalGroups) {
+    if (Array.isArray(group) && group.some((term) => normalize(term) === normalized)) terms.push(...group);
   }
   return terms.filter((term, index) =>
     term && terms.findIndex((candidate) => normalize(candidate) === normalize(term)) === index

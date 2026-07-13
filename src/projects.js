@@ -104,6 +104,7 @@ export function buildEvidenceRows({ projectPapers = [], papers = [], researchCar
           methods: textList(paper.methods, "methods")
         },
         card: card ? {
+          id: card.id,
           quote: plainText(card.quoteText, "quote"),
           summary: plainText(card.summary, "summary"),
           evidenceType: plainText(card.evidenceType, "evidenceType"),
@@ -113,6 +114,26 @@ export function buildEvidenceRows({ projectPapers = [], papers = [], researchCar
     }
   }
   return rows;
+}
+
+export function filterEvidenceRows(rows = [], { stance = "", evidenceType = "" } = {}) {
+  return rows.filter((row) => (!stance || row.stance === stance) && (!evidenceType || row.card?.evidenceType === evidenceType));
+}
+
+export function summarizeEvidenceRows(rows = []) {
+  const papers = new Map();
+  let cards = 0;
+  for (const row of rows) {
+    if (!papers.has(row.paperId)) papers.set(row.paperId, row.stance);
+    if (row.card?.quote) cards += 1;
+  }
+  return {
+    papers: papers.size,
+    supports: [...papers.values()].filter((stance) => stance === "supports").length,
+    opposes: [...papers.values()].filter((stance) => stance === "opposes").length,
+    mixed: [...papers.values()].filter((stance) => stance === "mixed").length,
+    cards
+  };
 }
 
 const evidenceColumns = [

@@ -43,22 +43,22 @@ function quoteFtsToken(value) {
   return `"${String(value).replaceAll('"', '""')}"`;
 }
 
-function buildGroups(tokens, semantic) {
+function buildGroups(tokens, semantic, termGroups) {
   return tokens.map((token) => {
-    const expanded = expandQuaternarySearchTerms(token.value, { semantic })
+    const expanded = expandQuaternarySearchTerms(token.value, { semantic, additionalGroups: termGroups })
       .map((value) => ({ value, phrase: token.phrase }))
       .filter((candidate, index, values) => values.findIndex((item) => tokenKey(item) === tokenKey(candidate)) === index);
     return expanded;
   });
 }
 
-export function buildSearchQuery(value, { semantic = true } = {}) {
+export function buildSearchQuery(value, { semantic = true, termGroups = [] } = {}) {
   const tokens = tokenizeQuery(value);
   if (tokens.length === 0) return null;
 
   const groups = [];
   let tokenCount = 0;
-  for (const group of buildGroups(tokens, semantic)) {
+  for (const group of buildGroups(tokens, semantic, termGroups)) {
     if (tokenCount >= maxSearchTokens) break;
     const limited = group.slice(0, maxSearchTokens - tokenCount);
     if (limited.length === 0) continue;

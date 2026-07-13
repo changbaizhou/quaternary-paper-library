@@ -141,3 +141,28 @@ test("searchLibrary keeps unsafe indexed text as text and supports exact phrases
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("custom terminology immediately participates in semantic library search", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "qpl-search-terms-"));
+  const dbPath = path.join(dir, "library.sqlite");
+  try {
+    initDb(dbPath);
+    const repo = new PaperRepository(dbPath);
+    const paperId = createPaper(repo, { title: "Permafrost change on the plateau" });
+    const term = repo.createCustomTerm({
+      canonical: "permafrost",
+      aliases: ["冻土", "永久冻土"],
+      category: "theme",
+      definition: "Ground that remains frozen."
+    });
+
+    assert.equal(term.version, 1);
+    assert.deepEqual(repo.searchLibrary({ query: "冻土", scope: "metadata" }).items.map((item) => item.paperId), [paperId]);
+    assert.equal(repo.searchLibrary({ query: "冻土", scope: "metadata", semantic: false }).total, 0);
+    assert.equal(repo.updateCustomTerm(term.id, { expectedVersion: 1, aliases: ["冻土带"] }).version, 2);
+    assert.throws(() => repo.updateCustomTerm(term.id, { expectedVersion: 1, definition: "stale" }), /version/i);
+    assert.equal(repo.deleteCustomTerm(term.id), true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

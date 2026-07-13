@@ -50,7 +50,7 @@ import {
 } from "./repository.js";
 import { classifyText } from "./taxonomy.js";
 import { translateText, TranslationError } from "./translation.js";
-import { exportProjectEvidenceCsv, exportProjectEvidenceMarkdown } from "./projects.js";
+import { exportProjectEvidenceCsv, exportProjectEvidenceMarkdown, filterEvidenceRows } from "./projects.js";
 import {
   answerResearchQuestion,
   buildResearchContext,
@@ -401,6 +401,19 @@ function publicPaper(paper) {
   };
 }
 
+function publicCustomTerm(term) {
+  return {
+    id: term.id,
+    canonical: term.canonical,
+    aliases: term.aliases,
+    category: term.category,
+    definition: term.definition,
+    version: term.version,
+    createdAt: term.createdAt,
+    updatedAt: term.updatedAt
+  };
+}
+
 const citationExportFormats = {
   bibtex: { contentType: "application/x-bibtex; charset=utf-8", filename: "citations.bib", render: (papers) => exportBibtex(papers) },
   ris: { contentType: "application/x-research-info-systems; charset=utf-8", filename: "citations.ris", render: (papers) => exportRis(papers) },
@@ -513,6 +526,10 @@ function publicProjectPaper(projectPaper) {
 }
 
 function sendProjectError(error, response, next) {
+  if (error instanceof VersionConflictError) {
+    response.status(409).json({ error: error.message });
+    return;
+  }
   if (error.status === 400 || error.status === 404 || error.status === 409 || error instanceof TypeError) {
     response.status(error.status || 400).json({ error: error.message });
     return;
@@ -555,7 +572,13 @@ export function createPaperIndexService({
         extractOcrPages,
         ocr
       });
-      return { indexState: "indexed", ...summary };
+      let knowledge = null;
+      try {
+        knowledge = repo.rebuildPaperKnowledge(paper.id);
+      } catch {
+        knowledge = { indexState: "failed" };
+      }
+      return { indexState: "indexed", ...summary, knowledge };
     } catch {
       const error = new Error("Page text extraction failed");
       error.status = 422;
@@ -799,14 +822,42 @@ export function createApp(options = {}) {
     }
   });
 
+  app.get("/api/projects/:id/writing", (request, response, next) => {
+    try {
+      response.json(repo.getWritingDraft(request.params.id));
+    } catch (error) {
+      sendProjectError(error, response, next);
+    }
+  });
+
+  app.patch("/api/projects/:id/writing", (request, response, next) => {
+    try {
+      response.json(repo.updateWritingDraft(request.params.id, request.body || {}));
+    } catch (error) {
+      sendProjectError(error, response, next);
+    }
+  });
+
+  app.post("/api/projects/:id/writing/evidence", (request, response, next) => {
+    try {
+      response.json(repo.insertWritingEvidence(request.params.id, request.body || {}));
+    } catch (error) {
+      sendProjectError(error, response, next);
+    }
+  });
+
   app.get("/api/projects/:id/evidence", (request, response, next) => {
     try {
       const format = request.query.format || "json";
-      const rows = repo.getProjectEvidence(request.params.id);
-      if (rows === null) {
+      const allRows = repo.getProjectEvidence(request.params.id);
+      if (allRows === null) {
         response.status(404).json({ error: "Project not found" });
         return;
       }
+      const rows = filterEvidenceRows(allRows, {
+        stance: String(request.query.stance || ""),
+        evidenceType: String(request.query.evidenceType || "")
+      });
       if (format === "json") {
         response.json(rows);
         return;
@@ -1076,6 +1127,101 @@ export function createApp(options = {}) {
         query: request.query.query || "",
         filters: parseFilters(request.query)
       }).map(publicPaper));
+  });
+
+  app.get("/api/terms", (request, response) => {
+    response.json(repo.listCustomTerms(request.query.q || "").map(publicCustomTerm));
+  });
+
+  app.post("/api/terms", (request, response, next) => {
+    try {
+      response.status(201).json(publicCustomTerm(repo.createCustomTerm(request.body || {})));
+    } catch (error) {
+      respondToPaperStateError(error, response, next);
+    }
+  });
+
+  app.patch("/api/terms/:id", (request, response, next) => {
+    try {
+      const term = repo.updateCustomTerm(request.params.id, request.body || {});
+      if (!term) {
+        response.status(404).json({ error: "Term not found" });
+        return;
+      }
+      response.json(publicCustomTerm(term));
+    } catch (error) {
+      if (error instanceof VersionConflictError) {
+        response.status(409).json({ error: error.message });
+        return;
+      }
+      respondToPaperStateError(error, response, next);
+    }
+  });
+
+  app.delete("/api/terms/:id", (request, response, next) => {
+    try {
+      if (request.body?.confirm !== true) {
+        response.status(400).json({ error: "Term deletion confirmation is required" });
+        return;
+      }
+      if (!repo.deleteCustomTerm(request.params.id)) {
+        response.status(404).json({ error: "Term not found" });
+        return;
+      }
+      response.json({ deleted: true });
+    } catch (error) {
+      respondToPaperStateError(error, response, next);
+    }
+  });
+
+  app.get("/api/papers/:id/knowledge", (request, response, next) => {
+    try {
+      const paper = repo.getPaper(Number(request.params.id));
+      if (!paper) {
+        response.status(404).json({ error: "Paper not found" });
+        return;
+      }
+      response.json({
+        references: repo.listPaperReferences(paper.id),
+        assets: repo.listPaperAssets(paper.id),
+        relations: repo.listPaperRelations(paper.id)
+      });
+    } catch (error) {
+      respondToPaperStateError(error, response, next);
+    }
+  });
+
+  app.post("/api/papers/:id/relations", (request, response, next) => {
+    try {
+      const body = request.body || {};
+      response.status(201).json(repo.upsertPaperRelation(request.params.id, body.targetPaperId, body));
+    } catch (error) {
+      respondToPaperStateError(error, response, next);
+    }
+  });
+
+  app.delete("/api/papers/:id/relations/:relationId", (request, response, next) => {
+    try {
+      if (request.body?.confirm !== true) {
+        response.status(400).json({ error: "Paper relation deletion confirmation is required" });
+        return;
+      }
+      if (!repo.deletePaperRelation(request.params.id, request.params.relationId)) {
+        response.status(404).json({ error: "Manual paper relation not found" });
+        return;
+      }
+      response.json({ deleted: true });
+    } catch (error) {
+      respondToPaperStateError(error, response, next);
+    }
+  });
+
+  app.post("/api/papers/:id/knowledge/rebuild", (request, response, next) => {
+    try {
+      response.json(repo.rebuildPaperKnowledge(request.params.id));
+    } catch (error) {
+      respondToPaperStateError(error, response, next);
+    }
   });
 
   app.get("/api/search", (request, response) => {

@@ -427,3 +427,44 @@ test("failed reading progress is requeued with newer pending values winning", as
   );
   assert.equal(JSON.stringify(context.result), JSON.stringify({ lastReadPage: 9, bookmarkPage: 2 }));
 });
+
+test("knowledge workspace exposes folder import, terminology, and paper knowledge controls", async () => {
+  const html = await readFile("public/index.html", "utf8");
+  const script = await readFile("public/app.js", "utf8");
+  const css = await readFile("public/styles.css", "utf8");
+
+  for (const id of [
+    "folderInput", "importFolderButton", "openTerminologyButton", "terminologyDialog",
+    "termSearchInput", "termList", "termCanonicalField", "termAliasesField",
+    "termCategoryField", "termDefinitionField", "saveTermButton", "paperKnowledgeButton",
+    "paperKnowledgeDialog", "knowledgeRelationGraph", "knowledgeReferenceList",
+    "knowledgeAssetList", "rebuildPaperKnowledgeButton"
+  ]) assert.match(html, new RegExp(`id="${id}"`));
+
+  assert.match(html, /id="folderInput"[^>]*webkitdirectory[^>]*multiple/);
+  assert.match(script, /webkitRelativePath/);
+  assert.match(script, /\/api\/terms/);
+  assert.match(script, /\/api\/papers\/\$\{[^}]+\}\/knowledge/);
+  assert.match(script, /createElementNS/);
+  assert.match(script, /escapeHtml/);
+  assert.match(css, /\.terminology-dialog/);
+  assert.match(css, /\.knowledge-dialog/);
+  assert.match(css, /\.relation-graph/);
+});
+
+test("project workspace exposes evidence filters, statistics, inline editing, and citation writing", async () => {
+  const html = await readFile("public/index.html", "utf8");
+  const script = await readFile("public/app.js", "utf8");
+  const css = await readFile("public/styles.css", "utf8");
+
+  for (const id of [
+    "evidenceStanceFilter", "evidenceTypeFilter", "projectEvidenceStats", "projectWritingPanel",
+    "writingTitleField", "writingBodyField", "writingCitationStyle", "writingSaveStatus",
+    "writingBibliography", "saveWritingDraftButton"
+  ]) assert.match(html, new RegExp(`id="${id}"`));
+  assert.match(script, /\/api\/projects\/\$\{[^}]+\}\/writing/);
+  assert.match(script, /insert-writing-evidence/);
+  assert.match(script, /data-action="update-evidence-relation"/);
+  assert.match(css, /\.project-writing-panel/);
+  assert.match(css, /\.project-evidence-stats/);
+});

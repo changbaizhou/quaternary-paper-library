@@ -42,7 +42,7 @@ test("migration v4 creates page-linked annotation and research card tables", asy
     ).all().map(({ name }) => name).sort();
     db.close();
 
-    assert.deepEqual(versions.map(({ version }) => version), [1, 2, 3, 4, 5, 6, 7]);
+    assert.deepEqual(versions.map(({ version }) => version), [1, 2, 3, 4, 5, 6, 7, 8]);
     assert.deepEqual(tables, ["annotations", "research_cards"]);
     assert.deepEqual(annotationColumns, [
       "id", "paper_id", "page_number", "kind", "quote_text", "translated_text",

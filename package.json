@@ -7,6 +7,7 @@
     "start": "node src/server.js",
     "reprocess": "node scripts/reprocessLibrary.js",
     "index-library": "node scripts/indexLibrary.js",
+    "rebuild-knowledge": "node scripts/rebuildKnowledge.js",
     "test": "node --test",
     "test:browser": "playwright test"
   },

@@ -41,7 +41,19 @@ const state = {
   selectedProject: null,
   projectPapers: [],
   projectEvidenceRows: [],
+  visibleProjectEvidenceRows: [],
+  writingDraft: null,
+  writingDirty: false,
+  writingSaveTimer: null,
+  writingSavePromise: null,
+  projectDetailMode: "evidence",
   projectPaperDialogMode: "papers",
+  customTerms: [],
+  selectedCustomTerm: null,
+  termSearchTimer: null,
+  paperKnowledge: null,
+  knowledgePaperId: null,
+  knowledgeCandidates: [],
   currentView: "library",
   selectedDraft: null,
   selectedPaper: null,
@@ -208,11 +220,52 @@ const workspaceElements = {
   projectEvidencePanel: document.querySelector("#projectEvidencePanel"),
   projectEvidence: document.querySelector("#projectEvidence"),
   projectEvidenceMeta: document.querySelector("#projectEvidenceMeta"),
+  projectEvidenceContent: document.querySelector("#projectEvidenceContent"),
+  evidenceStanceFilter: document.querySelector("#evidenceStanceFilter"),
+  evidenceTypeFilter: document.querySelector("#evidenceTypeFilter"),
+  evidenceStats: document.querySelector("#projectEvidenceStats"),
+  writingPanel: document.querySelector("#projectWritingPanel"),
+  writingTitle: document.querySelector("#writingTitleField"),
+  writingBody: document.querySelector("#writingBodyField"),
+  writingCitationStyle: document.querySelector("#writingCitationStyle"),
+  writingStatus: document.querySelector("#writingSaveStatus"),
+  writingBibliography: document.querySelector("#writingBibliography"),
   trashCount: document.querySelector("#trashCount"),
   trashList: document.querySelector("#trashList"),
   duplicateCandidates: document.querySelector("#duplicateCandidates"),
   backupList: document.querySelector("#backupList"),
   maintenanceProgress: document.querySelector("#maintenanceProgress")
+};
+
+const terminologyElements = {
+  dialog: document.querySelector("#terminologyDialog"),
+  search: document.querySelector("#termSearchInput"),
+  list: document.querySelector("#termList"),
+  form: document.querySelector("#termForm"),
+  id: document.querySelector("#termIdField"),
+  version: document.querySelector("#termVersionField"),
+  canonical: document.querySelector("#termCanonicalField"),
+  aliases: document.querySelector("#termAliasesField"),
+  category: document.querySelector("#termCategoryField"),
+  definition: document.querySelector("#termDefinitionField"),
+  deleteButton: document.querySelector("#deleteTermButton")
+};
+
+const knowledgeElements = {
+  button: document.querySelector("#paperKnowledgeButton"),
+  dialog: document.querySelector("#paperKnowledgeDialog"),
+  title: document.querySelector("#paperKnowledgeTitle"),
+  meta: document.querySelector("#paperKnowledgeMeta"),
+  graph: document.querySelector("#knowledgeRelationGraph"),
+  relationTarget: document.querySelector("#knowledgeRelationTarget"),
+  relationType: document.querySelector("#knowledgeRelationType"),
+  relationReason: document.querySelector("#knowledgeRelationReason"),
+  manualRelations: document.querySelector("#knowledgeManualRelations"),
+  relationCount: document.querySelector("#knowledgeRelationCount"),
+  referenceList: document.querySelector("#knowledgeReferenceList"),
+  referenceCount: document.querySelector("#knowledgeReferenceCount"),
+  assetList: document.querySelector("#knowledgeAssetList"),
+  assetCount: document.querySelector("#knowledgeAssetCount")
 };
 
 const researchElements = {
@@ -1299,23 +1352,125 @@ function renderProjectQueue() {
 }
 
 function renderProjectEvidence() {
-  const rows = state.projectEvidenceRows;
-  workspaceElements.projectEvidenceMeta.textContent = `${rows.length} 条证据行`;
+  const stance = workspaceElements.evidenceStanceFilter.value;
+  const evidenceType = workspaceElements.evidenceTypeFilter.value;
+  const rows = state.projectEvidenceRows.filter((row) => (!stance || row.stance === stance) && (!evidenceType || row.card?.evidenceType === evidenceType));
+  state.visibleProjectEvidenceRows = rows;
+  const paperStances = new Map(state.projectEvidenceRows.map((row) => [row.paperId, row.stance]));
+  const counts = {
+    supports: [...paperStances.values()].filter((value) => value === "supports").length,
+    opposes: [...paperStances.values()].filter((value) => value === "opposes").length,
+    mixed: [...paperStances.values()].filter((value) => value === "mixed").length,
+    cards: state.projectEvidenceRows.filter((row) => row.card?.quote).length
+  };
+  workspaceElements.projectEvidenceMeta.textContent = `${rows.length}/${state.projectEvidenceRows.length} 条证据行`;
+  workspaceElements.evidenceStats.textContent = `论文 ${paperStances.size} · 支持 ${counts.supports} · 反对 ${counts.opposes} · 混合 ${counts.mixed} · 卡片 ${counts.cards}`;
   if (!rows.length) {
     workspaceElements.projectEvidence.innerHTML = `<div class="empty-state">暂无证据</div>`;
     return;
   }
   workspaceElements.projectEvidence.innerHTML = `
     <div class="project-evidence-row project-evidence-head"><span>论文</span><span>关系</span><span>分类</span><span>研究卡片</span></div>
-    ${rows.map((row) => `
+    ${rows.map((row, index) => `
       <article class="project-evidence-row">
         <div data-label="论文"><button type="button" class="record-link" data-action="open-evidence-paper" data-paper-id="${row.paperId}">${escapeHtml(row.citationKey || row.title || "未命名论文")}</button><strong>${escapeHtml(row.title || "")}</strong><small>${escapeHtml([row.authors, row.year, row.paperStatus].filter(Boolean).join(" · "))}</small></div>
-        <div data-label="关系"><span>${escapeHtml(row.stance)}</span><span>${escapeHtml(row.projectStatus)}</span><span>P${row.priority}</span><small>${escapeHtml(row.projectNote)}</small></div>
+        <div data-label="关系" class="evidence-relation-controls">
+          <select aria-label="立场" data-action="update-evidence-relation" data-field="stance" data-paper-id="${row.paperId}">${["supports", "opposes", "mixed", "background", "unknown"].map((value) => `<option value="${value}"${row.stance === value ? " selected" : ""}>${value}</option>`).join("")}</select>
+          <select aria-label="项目状态" data-action="update-evidence-relation" data-field="projectStatus" data-paper-id="${row.paperId}">${["queued", "reading", "reviewed"].map((value) => `<option value="${value}"${row.projectStatus === value ? " selected" : ""}>${value}</option>`).join("")}</select>
+          <small>P${row.priority} · ${escapeHtml(row.projectNote)}</small>
+        </div>
         <div data-label="分类"><span>${escapeHtml(row.classification.regions)}</span><span>${escapeHtml(row.classification.periods)}</span><span>${escapeHtml(row.classification.materials)}</span><span>${escapeHtml(row.classification.methods)}</span></div>
-        <div data-label="研究卡片">${row.card.quote ? `<button type="button" class="record-link" data-action="open-evidence-card" data-paper-id="${row.paperId}" data-page="${row.card.page}">p.${row.card.page} · ${escapeHtml(row.card.evidenceType)}</button><p>${escapeHtml(row.card.quote)}</p><small>${escapeHtml(row.card.summary)}</small>` : "无卡片"}</div>
+        <div data-label="研究卡片">${row.card.quote ? `<button type="button" class="record-link" data-action="open-evidence-card" data-paper-id="${row.paperId}" data-page="${row.card.page}">p.${row.card.page} · ${escapeHtml(row.card.evidenceType)}</button><p>${escapeHtml(row.card.quote)}</p><small>${escapeHtml(row.card.summary)}</small><button type="button" class="secondary compact-action" data-action="insert-writing-evidence" data-evidence-index="${index}">插入写作</button>` : "无卡片"}</div>
       </article>
     `).join("")}
   `;
+}
+
+function renderWritingDraft() {
+  const draft = state.writingDraft;
+  const disabled = !draft;
+  workspaceElements.writingTitle.disabled = disabled;
+  workspaceElements.writingBody.disabled = disabled;
+  workspaceElements.writingCitationStyle.disabled = disabled;
+  document.querySelector("#saveWritingDraftButton").disabled = disabled;
+  workspaceElements.writingTitle.value = draft?.title || "";
+  workspaceElements.writingBody.value = draft?.body || "";
+  workspaceElements.writingCitationStyle.value = draft?.citationStyle || "gbt7714";
+  workspaceElements.writingBibliography.textContent = draft?.bibliography || "暂无已引用论文";
+  workspaceElements.writingStatus.textContent = draft ? `已保存 · 版本 ${draft.version}` : "请选择项目";
+  state.writingDirty = false;
+}
+
+function showProjectDetailMode(mode) {
+  state.projectDetailMode = mode;
+  const writing = mode === "writing";
+  workspaceElements.projectEvidenceContent.hidden = writing;
+  workspaceElements.writingPanel.hidden = !writing;
+  document.querySelector("#showProjectEvidenceButton").classList.toggle("is-active", !writing);
+  document.querySelector("#showProjectWritingButton").classList.toggle("is-active", writing);
+  document.querySelector("#exportProjectEvidenceCsv").hidden = writing;
+  document.querySelector("#exportProjectEvidenceMarkdown").hidden = writing;
+}
+
+async function saveWritingDraft() {
+  if (!state.selectedProject || !state.writingDraft) return null;
+  if (state.writingSavePromise) return state.writingSavePromise;
+  if (state.writingSaveTimer) window.clearTimeout(state.writingSaveTimer);
+  state.writingSaveTimer = null;
+  workspaceElements.writingStatus.textContent = "正在保存…";
+  const promise = api(`/api/projects/${state.selectedProject.id}/writing`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      title: workspaceElements.writingTitle.value,
+      body: workspaceElements.writingBody.value,
+      citationStyle: workspaceElements.writingCitationStyle.value,
+      citedPaperIds: state.writingDraft.citedPaperIds,
+      expectedVersion: state.writingDraft.version
+    })
+  });
+  state.writingSavePromise = promise;
+  try {
+    state.writingDraft = await promise;
+    state.writingDirty = false;
+    renderWritingDraft();
+    return state.writingDraft;
+  } catch (error) {
+    workspaceElements.writingStatus.textContent = error.status === 409 ? "保存冲突，请重新选择项目后再试" : error.message;
+    return null;
+  } finally {
+    if (state.writingSavePromise === promise) state.writingSavePromise = null;
+  }
+}
+
+function scheduleWritingAutosave() {
+  if (!state.writingDraft) return;
+  state.writingDirty = true;
+  workspaceElements.writingStatus.textContent = "有未保存修改";
+  if (state.writingSaveTimer) window.clearTimeout(state.writingSaveTimer);
+  state.writingSaveTimer = window.setTimeout(() => void saveWritingDraft(), 800);
+}
+
+async function insertEvidenceIntoWriting(row) {
+  if (!state.selectedProject || !state.writingDraft || !row?.card?.quote) return;
+  if (state.writingDirty && !await saveWritingDraft()) return;
+  try {
+    state.writingDraft = await api(`/api/projects/${state.selectedProject.id}/writing/evidence`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        paperId: row.paperId,
+        quote: row.card.quote,
+        pageNumber: Number(row.card.page),
+        expectedVersion: state.writingDraft.version
+      })
+    });
+    renderWritingDraft();
+    showProjectDetailMode("writing");
+    workspaceElements.writingStatus.textContent = "摘录与引用已插入";
+  } catch (error) {
+    workspaceElements.writingStatus.textContent = error.message;
+  }
 }
 
 async function loadSelectedProject(project) {
@@ -1323,17 +1478,23 @@ async function loadSelectedProject(project) {
   if (!project) {
     state.projectPapers = [];
     state.projectEvidenceRows = [];
+    state.writingDraft = null;
     renderProjectQueue();
     renderProjectEvidence();
+    renderWritingDraft();
     renderResearchScopes();
     renderResearchHistory("project", []);
     return;
   }
-  state.projectPapers = await api(`/api/projects/${project.id}/papers`);
-  state.projectEvidenceRows = await api(`/api/projects/${project.id}/evidence?format=json`);
+  [state.projectPapers, state.projectEvidenceRows, state.writingDraft] = await Promise.all([
+    api(`/api/projects/${project.id}/papers`),
+    api(`/api/projects/${project.id}/evidence?format=json`),
+    api(`/api/projects/${project.id}/writing`)
+  ]);
   renderProjects();
   renderProjectQueue();
   renderProjectEvidence();
+  renderWritingDraft();
   renderResearchScopes();
   await loadResearchHistory("project", project.id);
 }
@@ -1423,6 +1584,7 @@ function fillFormFromDraft(draft) {
   saveElements.button.textContent = "仍然单独入库";
   renderEvidence(draft);
   renderDraftDuplicateWarning(draft);
+  knowledgeElements.button.disabled = true;
   updateTrashPaperButton();
 }
 
@@ -1510,6 +1672,7 @@ function fillFormFromPaper(paper) {
   saveElements.button.textContent = "保存更改";
   setPaperSaveState("已保存", "is-success");
   document.querySelector("#evidenceBox").textContent = "已确认论文";
+  knowledgeElements.button.disabled = false;
   updateTrashPaperButton();
 }
 
@@ -1533,6 +1696,7 @@ function clearPaperSelection() {
   document.querySelector("#evidenceBox").textContent = "";
   saveElements.button.textContent = "确认入库";
   setPaperSaveState("未修改", "is-neutral");
+  knowledgeElements.button.disabled = true;
   updateTrashPaperButton();
 }
 
@@ -1666,6 +1830,139 @@ function recordLastReadPage(pageNumber) {
   state.reader.lastReadPage = page;
   updateBookmarkControls();
   void saveReadingProgress({ lastReadPage: page });
+}
+
+function resetTermForm() {
+  state.selectedCustomTerm = null;
+  terminologyElements.form.reset();
+  terminologyElements.id.value = "";
+  terminologyElements.version.value = "";
+  terminologyElements.deleteButton.disabled = true;
+  terminologyElements.canonical.focus();
+}
+
+function selectCustomTerm(term) {
+  state.selectedCustomTerm = term;
+  terminologyElements.id.value = String(term.id);
+  terminologyElements.version.value = String(term.version);
+  terminologyElements.canonical.value = term.canonical || "";
+  terminologyElements.aliases.value = joinList(term.aliases);
+  terminologyElements.category.value = term.category || "";
+  terminologyElements.definition.value = term.definition || "";
+  terminologyElements.deleteButton.disabled = false;
+  renderCustomTerms();
+}
+
+function renderCustomTerms() {
+  if (!state.customTerms.length) {
+    terminologyElements.list.innerHTML = `<div class="empty-state">暂无自定义术语</div>`;
+    return;
+  }
+  terminologyElements.list.innerHTML = state.customTerms.map((term) => `
+    <button type="button" class="term-list-item${state.selectedCustomTerm?.id === term.id ? " selected" : ""}" data-term-id="${term.id}">
+      <strong>${escapeHtml(term.canonical)}</strong>
+      <span>${escapeHtml(term.aliases.join(" · ") || "无别名")}</span>
+      <small>${escapeHtml(term.category || "未分类")}</small>
+    </button>
+  `).join("");
+}
+
+async function loadCustomTerms() {
+  const query = terminologyElements.search.value.trim();
+  state.customTerms = await api(`/api/terms${query ? `?q=${encodeURIComponent(query)}` : ""}`);
+  if (state.selectedCustomTerm) {
+    state.selectedCustomTerm = state.customTerms.find((term) => term.id === state.selectedCustomTerm.id) || null;
+  }
+  renderCustomTerms();
+}
+
+async function openTerminologyDialog() {
+  await loadCustomTerms();
+  terminologyElements.dialog.showModal();
+}
+
+function relationLabel(type) {
+  return ({ cites: "引用", supports: "支持", opposes: "反对", related: "相关", custom: "自定义", "same-region": "同区域", "same-method": "同方法", "same-period": "同时期" })[type] || type || "相关";
+}
+
+function appendSvgElement(name, attributes = {}, text = "") {
+  const element = document.createElementNS("http://www.w3.org/2000/svg", name);
+  for (const [key, value] of Object.entries(attributes)) element.setAttribute(key, String(value));
+  if (text) element.textContent = text;
+  return element;
+}
+
+function renderRelationGraph(relations) {
+  const graph = knowledgeElements.graph;
+  graph.replaceChildren();
+  const entries = [...(relations.stored || []), ...(relations.suggested || [])].slice(0, 20);
+  knowledgeElements.relationCount.textContent = `${entries.length} 个关系`;
+  const center = { x: 400, y: 155 };
+  const positions = entries.map((_, index) => {
+    const angle = (Math.PI * 2 * index / Math.max(entries.length, 1)) - Math.PI / 2;
+    return { x: center.x + Math.cos(angle) * 305, y: center.y + Math.sin(angle) * 112 };
+  });
+  entries.forEach((relation, index) => {
+    graph.append(appendSvgElement("line", { x1: center.x, y1: center.y, x2: positions[index].x, y2: positions[index].y, class: "relation-edge" }));
+    const midpointX = (center.x + positions[index].x) / 2;
+    const midpointY = (center.y + positions[index].y) / 2;
+    graph.append(appendSvgElement("text", { x: midpointX, y: midpointY - 4, class: "relation-edge-label" }, relationLabel(relation.relationType)));
+  });
+  entries.forEach((relation, index) => {
+    const group = appendSvgElement("g", { class: "relation-node relation-target", "data-paper-id": relation.targetPaperId, tabindex: "0" });
+    group.append(appendSvgElement("circle", { cx: positions[index].x, cy: positions[index].y, r: 34 }));
+    const title = relation.targetTitle || "未命名论文";
+    group.append(appendSvgElement("text", { x: positions[index].x, y: positions[index].y + 4, "text-anchor": "middle" }, title.length > 12 ? `${title.slice(0, 12)}…` : title));
+    graph.append(group);
+  });
+  const centerGroup = appendSvgElement("g", { class: "relation-node relation-current" });
+  centerGroup.append(appendSvgElement("circle", { cx: center.x, cy: center.y, r: 46 }));
+  const currentTitle = state.selectedPaper?.title || "当前论文";
+  centerGroup.append(appendSvgElement("text", { x: center.x, y: center.y + 4, "text-anchor": "middle" }, currentTitle.length > 14 ? `${currentTitle.slice(0, 14)}…` : currentTitle));
+  graph.append(centerGroup);
+}
+
+function renderPaperKnowledge() {
+  const knowledge = state.paperKnowledge || { references: [], assets: [], relations: { stored: [], suggested: [] } };
+  renderRelationGraph(knowledge.relations || {});
+  const manualRelations = (knowledge.relations?.stored || []).filter((relation) => relation.origin === "manual");
+  knowledgeElements.manualRelations.innerHTML = manualRelations.map((relation) => `
+    <span class="manual-relation-chip">${escapeHtml(relationLabel(relation.relationType))} · ${escapeHtml(relation.targetTitle)}<button type="button" data-delete-relation-id="${relation.id}" title="删除手动关系">×</button></span>
+  `).join("");
+  knowledgeElements.referenceCount.textContent = `${knowledge.references.length} 条`;
+  knowledgeElements.referenceList.innerHTML = knowledge.references.length ? knowledge.references.map((reference) => `
+    <article class="knowledge-record">
+      <div><strong>${reference.ordinal}. ${escapeHtml(reference.title || reference.rawText || "未识别参考文献")}</strong><small>${escapeHtml([reference.year, reference.doi].filter(Boolean).join(" · "))}</small></div>
+      <button type="button" class="secondary compact-action" ${reference.matchedPaperId ? `data-knowledge-paper-id="${reference.matchedPaperId}"` : `data-knowledge-page="${reference.pageNumber}"`}>${reference.matchedPaperId ? "打开论文" : `第 ${reference.pageNumber} 页`}</button>
+    </article>
+  `).join("") : `<div class="empty-state">尚未解析出参考文献</div>`;
+  knowledgeElements.assetCount.textContent = `${knowledge.assets.length} 项`;
+  knowledgeElements.assetList.innerHTML = knowledge.assets.length ? knowledge.assets.map((asset) => `
+    <article class="knowledge-record">
+      <div><strong>${escapeHtml(`${asset.label} ${asset.caption || ""}`.trim())}</strong><small>${asset.assetType === "figure" ? "图" : "表"} · 第 ${asset.pageNumber} 页</small></div>
+      <button type="button" class="secondary compact-action" data-knowledge-page="${asset.pageNumber}">定位</button>
+    </article>
+  `).join("") : `<div class="empty-state">尚未解析出图表标题</div>`;
+}
+
+async function loadPaperKnowledge(paperId) {
+  state.paperKnowledge = await api(`/api/papers/${paperId}/knowledge`);
+  renderPaperKnowledge();
+}
+
+async function openPaperKnowledge() {
+  if (!state.selectedPaper) return;
+  state.knowledgePaperId = state.selectedPaper.id;
+  knowledgeElements.title.textContent = state.selectedPaper.title || "论文知识";
+  knowledgeElements.meta.textContent = "参考文献、关系与图表索引";
+  knowledgeElements.dialog.showModal();
+  try {
+    state.knowledgeCandidates = (await loadAllPapers()).filter((paper) => paper.id !== state.knowledgePaperId);
+    knowledgeElements.relationTarget.innerHTML = `<option value="">选择关联论文</option>${state.knowledgeCandidates.map((paper) => `<option value="${paper.id}">${escapeHtml(paper.title || "未命名论文")}</option>`).join("")}`;
+    await loadPaperKnowledge(state.knowledgePaperId);
+  } catch (error) {
+    knowledgeElements.meta.textContent = error.message;
+  }
 }
 
 function setFiltersVisible(visible) {
@@ -2494,23 +2791,37 @@ function scheduleNoteAutosave() {
   }, NOTE_AUTOSAVE_DELAY_MS);
 }
 
-document.querySelector("#uploadForm").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const input = document.querySelector("#pdfInput");
-  if (!input.files.length) return;
+async function uploadPdfFiles(files, input, { showCount = false } = {}) {
+  const pdfFiles = [...files].filter((file) => file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf"));
+  if (!pdfFiles.length) {
+    setStatus("所选位置没有 PDF 文件");
+    return;
+  }
   const body = new FormData();
-  for (const file of input.files) body.append("files", file);
+  for (const file of pdfFiles) {
+    const uploadName = file.webkitRelativePath || file.name;
+    body.append("files", file, uploadName);
+  }
 
-  setStatus("正在识别 PDF");
+  setStatus(showCount ? `正在识别 ${pdfFiles.length} 个 PDF` : "正在识别 PDF");
   try {
     await api("/api/uploads", { method: "POST", body });
     input.value = "";
     await loadDrafts();
-    setStatus("识别完成，等待确认");
+    setStatus(showCount ? `${pdfFiles.length} 个 PDF 识别完成，等待确认` : "识别完成，等待确认");
   } catch (error) {
     setStatus(error.message);
   }
+}
+
+document.querySelector("#uploadForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const input = document.querySelector("#pdfInput");
+  await uploadPdfFiles(input.files, input);
 });
+
+document.querySelector("#importFolderButton").addEventListener("click", () => document.querySelector("#folderInput").click());
+document.querySelector("#folderInput").addEventListener("change", (event) => void uploadPdfFiles(event.target.files, event.target, { showCount: true }));
 
 document.querySelector("#draftList").addEventListener("click", (event) => {
   const button = event.target.closest("[data-draft-id]");
@@ -2924,6 +3235,7 @@ workspaceElements.projectEvidence.addEventListener("click", async (event) => {
   try {
     if (button.dataset.action === "open-evidence-paper") await openEvidencePaper(button.dataset.paperId);
     if (button.dataset.action === "open-evidence-card") await openEvidencePaper(button.dataset.paperId, button.dataset.page);
+    if (button.dataset.action === "insert-writing-evidence") await insertEvidenceIntoWriting(state.visibleProjectEvidenceRows[Number(button.dataset.evidenceIndex)]);
   } catch (error) {
     setStatus(error.message);
   }
@@ -3002,6 +3314,154 @@ document.querySelector("#projectPaperForm").addEventListener("submit", async (ev
     setStatus(error.message);
   }
 });
+
+workspaceElements.projectEvidence.addEventListener("change", async (event) => {
+  const control = event.target.closest('[data-action="update-evidence-relation"]');
+  if (!control || !state.selectedProject) return;
+  try {
+    await api(`/api/projects/${state.selectedProject.id}/papers/${control.dataset.paperId}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ [control.dataset.field]: control.value })
+    });
+    await loadSelectedProject(state.selectedProject);
+    setStatus("项目证据关系已更新");
+  } catch (error) {
+    setStatus(error.message);
+  }
+});
+
+workspaceElements.evidenceStanceFilter.addEventListener("change", renderProjectEvidence);
+workspaceElements.evidenceTypeFilter.addEventListener("change", renderProjectEvidence);
+document.querySelector("#showProjectEvidenceButton").addEventListener("click", () => showProjectDetailMode("evidence"));
+document.querySelector("#showProjectWritingButton").addEventListener("click", () => showProjectDetailMode("writing"));
+document.querySelector("#saveWritingDraftButton").addEventListener("click", () => void saveWritingDraft());
+for (const control of [workspaceElements.writingTitle, workspaceElements.writingBody, workspaceElements.writingCitationStyle]) {
+  control.addEventListener("input", scheduleWritingAutosave);
+  control.addEventListener("change", scheduleWritingAutosave);
+}
+
+document.querySelector("#openTerminologyButton").addEventListener("click", () => void openTerminologyDialog().catch((error) => setStatus(error.message)));
+document.querySelector("#closeTerminologyButton").addEventListener("click", () => terminologyElements.dialog.close());
+document.querySelector("#newTermButton").addEventListener("click", resetTermForm);
+terminologyElements.search.addEventListener("input", () => {
+  if (state.termSearchTimer) window.clearTimeout(state.termSearchTimer);
+  state.termSearchTimer = window.setTimeout(() => void loadCustomTerms().catch((error) => setStatus(error.message)), 200);
+});
+terminologyElements.list.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-term-id]");
+  const term = state.customTerms.find((entry) => entry.id === Number(button?.dataset.termId));
+  if (term) selectCustomTerm(term);
+});
+terminologyElements.form.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const id = Number(terminologyElements.id.value) || null;
+  const payload = {
+    canonical: terminologyElements.canonical.value,
+    aliases: splitList(terminologyElements.aliases.value),
+    category: terminologyElements.category.value,
+    definition: terminologyElements.definition.value,
+    ...(id ? { expectedVersion: Number(terminologyElements.version.value) } : {})
+  };
+  try {
+    const term = await api(id ? `/api/terms/${id}` : "/api/terms", {
+      method: id ? "PATCH" : "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    state.selectedCustomTerm = term;
+    await loadCustomTerms();
+    selectCustomTerm(term);
+    setStatus(id ? "术语已更新" : "术语已创建");
+  } catch (error) {
+    setStatus(error.message);
+  }
+});
+terminologyElements.deleteButton.addEventListener("click", async () => {
+  const term = state.selectedCustomTerm;
+  if (!term || !await confirmAction("删除术语", `删除“${term.canonical}”后，其别名不再参与语义检索。`, "删除")) return;
+  try {
+    await api(`/api/terms/${term.id}`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ confirm: true })
+    });
+    resetTermForm();
+    await loadCustomTerms();
+    setStatus("术语已删除");
+  } catch (error) {
+    setStatus(error.message);
+  }
+});
+
+knowledgeElements.button.addEventListener("click", () => void openPaperKnowledge());
+document.querySelector("#closePaperKnowledgeButton").addEventListener("click", () => knowledgeElements.dialog.close());
+document.querySelector("#rebuildPaperKnowledgeButton").addEventListener("click", async () => {
+  if (!state.knowledgePaperId) return;
+  knowledgeElements.meta.textContent = "正在解析论文页文本…";
+  try {
+    const result = await api(`/api/papers/${state.knowledgePaperId}/knowledge/rebuild`, { method: "POST" });
+    await loadPaperKnowledge(state.knowledgePaperId);
+    knowledgeElements.meta.textContent = `已解析 ${result.references} 条参考文献和 ${result.assets} 个图表标题`;
+  } catch (error) {
+    knowledgeElements.meta.textContent = error.message;
+  }
+});
+document.querySelector("#knowledgeRelationForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!state.knowledgePaperId || !knowledgeElements.relationTarget.value) return;
+  try {
+    await api(`/api/papers/${state.knowledgePaperId}/relations`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        targetPaperId: Number(knowledgeElements.relationTarget.value),
+        relationType: knowledgeElements.relationType.value,
+        reason: knowledgeElements.relationReason.value
+      })
+    });
+    knowledgeElements.relationReason.value = "";
+    await loadPaperKnowledge(state.knowledgePaperId);
+    knowledgeElements.meta.textContent = "手动关系已保存";
+  } catch (error) {
+    knowledgeElements.meta.textContent = error.message;
+  }
+});
+knowledgeElements.manualRelations.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-delete-relation-id]");
+  if (!button || !state.knowledgePaperId) return;
+  try {
+    await api(`/api/papers/${state.knowledgePaperId}/relations/${button.dataset.deleteRelationId}`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ confirm: true })
+    });
+    await loadPaperKnowledge(state.knowledgePaperId);
+  } catch (error) {
+    knowledgeElements.meta.textContent = error.message;
+  }
+});
+knowledgeElements.graph.addEventListener("click", async (event) => {
+  const node = event.target.closest("[data-paper-id]");
+  if (!node) return;
+  knowledgeElements.dialog.close();
+  await openPaperRecord(node.dataset.paperId);
+});
+for (const list of [knowledgeElements.referenceList, knowledgeElements.assetList]) {
+  list.addEventListener("click", async (event) => {
+    const button = event.target.closest("button");
+    if (!button) return;
+    if (button.dataset.knowledgePaperId) {
+      knowledgeElements.dialog.close();
+      await openPaperRecord(button.dataset.knowledgePaperId);
+      return;
+    }
+    if (button.dataset.knowledgePage && state.knowledgePaperId) {
+      knowledgeElements.dialog.close();
+      await openEvidencePaper(state.knowledgePaperId, button.dataset.knowledgePage);
+    }
+  });
+}
 
 for (const [view, button] of Object.entries(viewButtons)) {
   button.addEventListener("click", () => void selectWorkspaceView(view));

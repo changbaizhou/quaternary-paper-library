@@ -1,7 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { classifyText } from "../src/taxonomy.js";
+import { classifyText, expandQuaternarySearchTerms } from "../src/taxonomy.js";
+
+test("custom terminology groups expand aliases without changing strict search", () => {
+  assert.deepEqual(
+    expandQuaternarySearchTerms("冻土", { additionalGroups: [["permafrost", "冻土", "永久冻土"]] }),
+    ["冻土", "permafrost", "永久冻土"]
+  );
+  assert.deepEqual(
+    expandQuaternarySearchTerms("冻土", { semantic: false, additionalGroups: [["permafrost", "冻土"]] }),
+    ["冻土"]
+  );
+});
 
 test("classifies quaternary geology dimensions", () => {
   const result = classifyText({

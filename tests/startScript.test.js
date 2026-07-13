@@ -31,3 +31,8 @@ test("local environment batch file is documented but ignored", async () => {
   assert.doesNotMatch(example, /(?:AQ\.|sk-[A-Za-z0-9]{16,})/);
   assert.match(gitignore, /^local\.env\.bat$/m);
 });
+
+test("package exposes a local knowledge rebuild command", async () => {
+  const packageJson = JSON.parse(await readFile("package.json", "utf8"));
+  assert.equal(packageJson.scripts["rebuild-knowledge"], "node scripts/rebuildKnowledge.js");
+});

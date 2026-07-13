@@ -24,6 +24,19 @@
   box-sizing: border-box;
 }
 
+.visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  min-width: 0 !important;
+  flex: 0 0 1px !important;
+  padding: 0 !important;
+  border: 0 !important;
+  overflow: hidden !important;
+  clip: rect(0 0 0 0) !important;
+  white-space: nowrap !important;
+}
+
 body {
   margin: 0;
   min-width: 1120px;
@@ -692,11 +705,100 @@ textarea:focus {
   border-bottom: 1px solid var(--line);
 }
 
+.project-evidence-content {
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.project-evidence-content[hidden],
+.project-writing-panel[hidden] {
+  display: none;
+}
+
+.project-evidence-tools {
+  display: grid;
+  grid-template-columns: 110px 120px minmax(0, 1fr);
+  align-items: end;
+  gap: 7px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.project-evidence-tools select,
+.evidence-relation-controls select {
+  min-width: 0;
+  padding: 5px;
+  font-size: 11px;
+}
+
+.project-evidence-stats {
+  min-width: 0;
+  padding-bottom: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
 .project-evidence {
   min-height: 0;
   flex: 1;
   overflow: auto;
   padding-top: 8px;
+}
+
+.project-writing-panel {
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding-top: 9px;
+  overflow: auto;
+}
+
+.writing-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 120px;
+  gap: 8px;
+}
+
+.writing-body-label {
+  min-height: 260px;
+  flex: 1;
+}
+
+.writing-body-label textarea {
+  min-height: 240px;
+  height: 100%;
+  resize: vertical;
+  line-height: 1.6;
+}
+
+.writing-save-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.writing-bibliography-section {
+  display: grid;
+  gap: 6px;
+  padding-top: 9px;
+  border-top: 1px solid var(--line);
+}
+
+.writing-bibliography {
+  max-height: 180px;
+  margin: 0;
+  overflow: auto;
+  color: var(--ink-soft);
+  font: 12px/1.55 "Microsoft YaHei", "Segoe UI", Arial, sans-serif;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .project-evidence-row {
@@ -1270,6 +1372,266 @@ textarea {
   text-align: center;
 }
 
+.workspace-dialog {
+  width: min(1120px, calc(100vw - 32px));
+  height: min(780px, calc(100vh - 32px));
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  color: var(--ink);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.workspace-dialog::backdrop {
+  background: rgba(17, 39, 44, 0.35);
+}
+
+.workspace-dialog-shell {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.workspace-dialog-heading {
+  min-height: 62px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-soft);
+}
+
+.workspace-dialog-heading p {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+#rebuildPaperKnowledgeButton {
+  min-width: 84px;
+  white-space: nowrap;
+}
+
+.terminology-dialog {
+  width: min(900px, calc(100vw - 32px));
+}
+
+.terminology-layout {
+  min-height: 0;
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(280px, 0.8fr) minmax(360px, 1.2fr);
+}
+
+.terminology-list-pane,
+.term-form {
+  min-width: 0;
+  min-height: 0;
+  padding: 12px;
+}
+
+.terminology-list-pane {
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--line);
+}
+
+.dialog-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 7px;
+  margin-bottom: 9px;
+}
+
+.term-list {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+}
+
+.term-list-item {
+  width: 100%;
+  display: grid;
+  gap: 4px;
+  margin-bottom: 6px;
+  padding: 9px;
+  border-color: var(--line);
+  background: var(--surface-raised);
+  color: var(--ink);
+  text-align: left;
+}
+
+.term-list-item:hover,
+.term-list-item.selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--ink);
+}
+
+.term-list-item span,
+.term-list-item small {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.term-form {
+  display: grid;
+  align-content: start;
+  gap: 11px;
+  overflow: auto;
+}
+
+.knowledge-dialog-body {
+  min-height: 0;
+  flex: 1;
+  display: grid;
+  grid-template-rows: minmax(290px, 0.9fr) minmax(240px, 1.1fr);
+  overflow: hidden;
+}
+
+.knowledge-section {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.relation-section {
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--line);
+}
+
+.knowledge-relation-form {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.2fr) 100px minmax(180px, 1fr) auto;
+  gap: 6px;
+  padding: 0 10px 7px;
+}
+
+.knowledge-relation-form input,
+.knowledge-relation-form select {
+  min-width: 0;
+  padding: 5px 7px;
+  font-size: 11px;
+}
+
+.relation-graph {
+  width: 100%;
+  min-height: 170px;
+  flex: 1;
+  background: #fbfcfa;
+}
+
+.knowledge-manual-relations {
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 4px 10px;
+  overflow: auto;
+}
+
+.manual-relation-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 5px;
+  border-radius: 5px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 10px;
+}
+
+.manual-relation-chip button {
+  min-height: 18px;
+  padding: 0 3px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+}
+
+.relation-edge {
+  stroke: var(--line-strong);
+  stroke-width: 1.5;
+}
+
+.relation-edge-label {
+  fill: var(--muted);
+  font-size: 10px;
+  text-anchor: middle;
+}
+
+.relation-node circle {
+  fill: var(--surface);
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+
+.relation-node text {
+  fill: var(--ink-soft);
+  font-size: 10px;
+  pointer-events: none;
+}
+
+.relation-current circle {
+  fill: var(--accent-soft);
+  stroke-width: 3;
+}
+
+.relation-target {
+  cursor: pointer;
+}
+
+.relation-target:hover circle {
+  fill: var(--blue-soft);
+}
+
+.knowledge-lists {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+
+.knowledge-lists > .knowledge-section + .knowledge-section {
+  border-left: 1px solid var(--line);
+}
+
+.knowledge-record-list {
+  height: calc(100% - 38px);
+  overflow: auto;
+  padding: 0 10px 10px;
+}
+
+.knowledge-record {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 2px;
+  border-bottom: 1px solid var(--line);
+}
+
+.knowledge-record > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.knowledge-record strong,
+.knowledge-record small {
+  overflow-wrap: anywhere;
+}
+
+.knowledge-record small {
+  color: var(--muted);
+}
+
 .auto-translate-toggle,
 .semantic-search-toggle {
   width: auto;
@@ -1585,6 +1947,16 @@ textarea {
 .text-layer ::selection {
   background: rgba(31, 111, 118, 0.28);
   color: transparent;
+}
+
+@media (min-width: 901px) and (max-width: 1500px) {
+  .app-header {
+    height: 112px;
+  }
+
+  .workspace {
+    height: calc(100vh - 112px);
+  }
 }
 
 @media (max-width: 900px) {

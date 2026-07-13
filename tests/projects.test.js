@@ -8,8 +8,10 @@ import {
   buildEvidenceRows,
   exportProjectEvidenceCsv,
   exportProjectEvidenceMarkdown,
+  filterEvidenceRows,
   normalizeProjectInput,
-  normalizeProjectPaperInput
+  normalizeProjectPaperInput,
+  summarizeEvidenceRows
 } from "../src/projects.js";
 import { initDb } from "../src/database.js";
 import { PaperRepository } from "../src/repository.js";
@@ -72,6 +74,10 @@ test("project pure functions normalize, sort, and export plain text safely", () 
   assert.match(exportProjectEvidenceMarkdown(rows), /B \\| title/);
   assert.match(exportProjectEvidenceMarkdown(rows), /title<br>next/);
   assert.ok(exportProjectEvidenceMarkdown(rows).indexOf("a-key") < exportProjectEvidenceMarkdown(rows).indexOf("b-key"));
+
+  assert.deepEqual(filterEvidenceRows(rows, { stance: "supports" }).map((row) => row.paperId), [2]);
+  assert.deepEqual(filterEvidenceRows(rows, { evidenceType: "supports" }).map((row) => row.paperId), [2]);
+  assert.deepEqual(summarizeEvidenceRows(rows), { papers: 2, supports: 1, opposes: 0, mixed: 0, cards: 1 });
 });
 
 test("repository supports multiple projects, optimistic locking, inactive relations, and atomic batches", async () => {
